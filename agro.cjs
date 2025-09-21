@@ -503,8 +503,8 @@ class FixedCryptoScalper {
 const config = {
     symbol: 'AVAXUSDT',
     timeframe: '3m',  // 3-minute for better signal quality
-    startDate: '2025-09-12',
-    endDate: '2025-09-14',
+    startDate: '2025-09-01',
+    endDate: '2025-09-02',
     initialBalance: 1000,
     
     // Proper EMA periods for trend detection
@@ -515,16 +515,16 @@ const config = {
     // Standard RSI settings
     rsiPeriod: 14,
     rsiOverbought: 75,
-    rsiOversold: 25,
+    rsiOversold: 35,
     
     // FIXED: Proper risk-reward ratio (2:1 minimum)
-    tp1Pct: 1.0,     // 1% profit target
+    tp1Pct: 1.2,     // 1% profit target
     tp2Pct: 2.0,     // 2% profit target
     slPct: -0.5,     // 0.5% stop loss = 2:1 risk-reward
     
     // REALISTIC fees (Binance spot trading)
-    makerFeePct: 0.0001,   // 0.01% maker fee (with BNB discount)
-    takerFeePct: 0.0001,   // 0.01% taker fee (with BNB discount)
+    makerFeePct: 0.001,   // 0.01% maker fee (with BNB discount)
+    takerFeePct: 0.001,   // 0.01% taker fee (with BNB discount)
     slippagePct: 0.0001,   // Minimal slippage with limit orders
     
     // Position sizing - use 95% of balance per trade
@@ -534,7 +534,7 @@ const config = {
     maxDailyLoss: -3,      // Stop at 3% daily loss
     cooldownPeriod: 5,     // Wait 5 candles after loss
     
-    backtest: false
+    backtest: true
 };
 
 console.log('🔧 FIXED Crypto Trading Bot');
