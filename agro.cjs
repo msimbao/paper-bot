@@ -534,7 +534,7 @@ const config = {
     maxDailyLoss: -3,      // Stop at 3% daily loss
     cooldownPeriod: 5,     // Wait 5 candles after loss
     
-    backtest: true
+    backtest: false
 };
 
 console.log('🔧 FIXED Crypto Trading Bot');
