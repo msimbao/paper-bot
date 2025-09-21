@@ -1,0 +1,24 @@
+{
+  "name": "paper-bot",
+  "version": "1.0.0",
+  "description": "testing bot to try out somemthing",
+  "homepage": "https://github.com/msimbao/paper-bot#readme",
+  "bugs": {
+    "url": "https://github.com/msimbao/paper-bot/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/msimbao/paper-bot.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "node-fetch": "^3.3.2"
+  }
+}
