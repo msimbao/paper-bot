@@ -503,9 +503,9 @@ class FixedCryptoScalper {
 const config = {
     symbol: 'AVAXUSDT',
     timeframe: '3m',  // 3-minute for better signal quality
-    startDate: '2025-09-01',
-    endDate: '2025-09-02',
-    initialBalance: 1000,
+    startDate: '2025-09-10',
+    endDate: '2025-09-19',
+    initialBalance: 898,
     
     // Proper EMA periods for trend detection
     emaFast: 12,
@@ -534,7 +534,7 @@ const config = {
     maxDailyLoss: -3,      // Stop at 3% daily loss
     cooldownPeriod: 5,     // Wait 5 candles after loss
     
-    backtest: false
+    backtest: true
 };
 
 console.log('🔧 FIXED Crypto Trading Bot');
