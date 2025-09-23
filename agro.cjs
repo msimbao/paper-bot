@@ -1,86 +1,98 @@
 const WebSocket = require('ws');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
-class FixedCryptoScalper {
+class CryptoScalpingTester {
     constructor(config = {}) {
         this.config = {
-            symbol: config.symbol || 'BTCUSDT',
-            timeframe: config.timeframe || '1m',
+            symbol: config.symbol || 'AVAXUSDT',
+            timeframe: config.timeframe || '5m',
             startDate: config.startDate || '2025-09-01',
             endDate: config.endDate || '2025-09-19',
             initialBalance: config.initialBalance || 1000,
-            
-            // More realistic EMA periods
-            emaFast: config.emaFast || 12,
-            emaMedium: config.emaMedium || 26,
-            emaSlow: config.emaSlow || 50,
-            
-            // RSI parameters
+            emaPeriod: config.emaPeriod || 100,
             rsiPeriod: config.rsiPeriod || 14,
-            rsiOverbought: config.rsiOverbought || 75,
-            rsiOversold: config.rsiOversold || 25,
-            
-            // IMPROVED: Better risk-reward ratio
-            tp1Pct: config.tp1Pct || 1.0,   // 1% profit target
-            tp2Pct: config.tp2Pct || 2.0,   // 2% profit target  
-            slPct: config.slPct || -0.5,    // 0.5% stop loss (2:1 risk reward minimum)
-            
-            // FIXED: More realistic fees and slippage
-            makerFeePct: config.makerFeePct || 0.0001,  // 0.01% maker fee
-            takerFeePct: config.takerFeePct || 0.0001,  // 0.01% taker fee
-            slippagePct: config.slippagePct || 0.0001,  // Minimal slippage for limit orders
-            
-            // Position sizing
-            positionSizePct: config.positionSizePct || 0.95, // Use 95% of available balance
-            
-            // Risk management
-            maxDailyLoss: config.maxDailyLoss || -3,
-            cooldownPeriod: config.cooldownPeriod || 5, // 5 candles cooldown after loss
-            
-            backtest: config.backtest || false
+            rsiEntry: config.rsiEntry || 45,
+            tp1Pct: config.tp1Pct || 1.2,
+            tp2Pct: config.tp2Pct || 2.0,
+            slPct: config.slPct || -1.2,
+            feePct: config.feePct || 0.00075,
+            slippagePct: config.slippagePct || 0.0005,
+            rsiExit1: config.rsiExit1 || 100,
+            rsiExit2: config.rsiExit2 || 85,
+            backtest: config.backtest || false,
+            // Real trading options
+            realTrading: config.realTrading || false,
+            apiKey: config.apiKey || '',
+            apiSecret: config.apiSecret || '',
+            // Connection settings
+            maxReconnectAttempts: config.maxReconnectAttempts || -1, // -1 for infinite
+            reconnectDelay: config.reconnectDelay || 5000,
+            heartbeatInterval: config.heartbeatInterval || 30000,
+            dataTimeoutMs: config.dataTimeoutMs || 120000 // 2 minutes without data = disconnect
         };
         
         this.balance = this.config.initialBalance;
-        this.position = null;
+        this.holdings = 0;
+        this.entryPrice = 0;
+        this.entryTime = null;
         this.wins = 0;
         this.losses = 0;
-        this.totalPnL = 0;
-        this.trades = [];
         this.priceData = [];
         this.ws = null;
-        this.lastTradeCandle = -1;
-        this.cooldownCounter = 0;
         
-        console.log('🔧 FIXED Bot Configuration:');
-        console.log(`Risk-Reward: ${Math.abs(this.config.tp1Pct / this.config.slPct).toFixed(1)}:1`);
-        console.log(`Fees: Maker ${this.config.makerFeePct * 100}%, Taker ${this.config.takerFeePct * 100}%`);
+        // Connection management
+        this.reconnectAttempts = 0;
+        this.isConnecting = false;
+        this.isConnected = false;
+        this.lastDataTime = null;
+        this.heartbeatTimer = null;
+        this.dataTimeoutTimer = null;
+        this.shouldReconnect = true;
+        
+        // Logging
+        this.logFile = `trading_log_${new Date().toISOString().split('T')[0]}.txt`;
+        this.initializeLogging();
     }
 
-    // Simple but effective EMA calculation
+    // Initialize logging system
+    initializeLogging() {
+        this.log('🚀 System initialized', 'INFO');
+        this.log(`Configuration: ${JSON.stringify(this.config, null, 2)}`, 'CONFIG');
+    }
+
+    // Enhanced logging with timestamps and levels
+    log(message, level = 'INFO') {
+        const timestamp = new Date().toISOString();
+        const logEntry = `[${timestamp}] [${level}] ${message}`;
+        
+        console.log(logEntry);
+        
+        // Write to log file
+        try {
+            fs.appendFileSync(this.logFile, logEntry + '\n');
+        } catch (error) {
+            console.error('Failed to write to log file:', error);
+        }
+    }
+
+    // Calculate EMA
     calculateEMA(data, period) {
         if (data.length < period) return data.map(() => null);
         
         const ema = [];
         const multiplier = 2 / (period + 1);
+        ema[0] = data[0];
         
-        // Start with simple average
-        let sum = 0;
-        for (let i = 0; i < period; i++) {
-            sum += data[i];
-            ema[i] = null;
-        }
-        ema[period - 1] = sum / period;
-        
-        // Calculate EMA
-        for (let i = period; i < data.length; i++) {
+        for (let i = 1; i < data.length; i++) {
             ema[i] = (data[i] * multiplier) + (ema[i - 1] * (1 - multiplier));
         }
         
         return ema;
     }
 
-    // RSI calculation
+    // Calculate RSI
     calculateRSI(data, period = 14) {
         if (data.length < period + 1) return data.map(() => null);
         
@@ -88,7 +100,6 @@ class FixedCryptoScalper {
         let gains = 0;
         let losses = 0;
 
-        // Calculate initial average gain/loss
         for (let i = 1; i <= period; i++) {
             const change = data[i] - data[i - 1];
             if (change > 0) gains += change;
@@ -98,14 +109,12 @@ class FixedCryptoScalper {
         let avgGain = gains / period;
         let avgLoss = losses / period;
         
-        // Fill initial values with null
         for (let i = 0; i < period; i++) {
             rsi[i] = null;
         }
 
-        rsi[period] = avgLoss === 0 ? 100 : 100 - (100 / (1 + (avgGain / avgLoss)));
+        rsi[period] = 100 - (100 / (1 + (avgGain / avgLoss)));
 
-        // Calculate remaining RSI values
         for (let i = period + 1; i < data.length; i++) {
             const change = data[i] - data[i - 1];
             const gain = change > 0 ? change : 0;
@@ -114,239 +123,97 @@ class FixedCryptoScalper {
             avgGain = ((avgGain * (period - 1)) + gain) / period;
             avgLoss = ((avgLoss * (period - 1)) + loss) / period;
 
-            rsi[i] = avgLoss === 0 ? 100 : 100 - (100 / (1 + (avgGain / avgLoss)));
+            rsi[i] = 100 - (100 / (1 + (avgGain / avgLoss)));
         }
 
         return rsi;
     }
 
-    // FIXED: Proper entry logic with confluence
-    shouldBuy(price, indicators, candle) {
-        const { emaFast, emaMedium, emaSlow, rsi } = indicators;
-        
-        // Prevent overtrading - cooldown period
-        if (this.cooldownCounter > 0) {
-            this.cooldownCounter--;
-            return false;
-        }
-        
-        // Strong trend confirmation required
-        const strongUptrend = emaFast > emaMedium && emaMedium > emaSlow;
-        const crossover = emaFast > emaMedium; // At minimum, fast above medium
-        
-        // RSI in favorable range (not overbought, ideally oversold recovery)
-        const rsiGood = rsi > this.config.rsiOversold && rsi < 60;
-        
-        // Price above key EMA
-        const priceAboveEMA = price > emaMedium;
-        
-        // ALL conditions must be met for entry
-        return strongUptrend && rsiGood && priceAboveEMA && !this.position;
+    // Create Binance API signature
+    createSignature(queryString) {
+        return crypto.createHmac('sha256', this.config.apiSecret)
+                    .update(queryString)
+                    .digest('hex');
     }
 
-    // FIXED: Proper exit logic
-    shouldSell(price, indicators) {
-        if (!this.position) return null;
-        
-        const entryPrice = this.position.entryPrice;
-        const changePct = ((price - entryPrice) / entryPrice) * 100;
-        const { rsi, emaFast, emaMedium } = indicators;
-        
-        // Stop loss - ALWAYS respect it
-        if (changePct <= this.config.slPct) {
-            return { reason: 'Stop Loss', changePct };
+    // Make authenticated Binance API request
+    async makeAuthenticatedRequest(endpoint, params = {}) {
+        if (!this.config.apiKey || !this.config.apiSecret) {
+            throw new Error('API credentials not provided');
         }
-        
-        // Take profit levels
-        if (changePct >= this.config.tp2Pct) {
-            return { reason: 'TP2', changePct };
-        }
-        
-        if (changePct >= this.config.tp1Pct) {
-            return { reason: 'TP1', changePct };
-        }
-        
-        // Trend reversal exit (protect profits)
-        if (changePct > 0.2 && emaFast < emaMedium) {
-            return { reason: 'Trend Reversal', changePct };
-        }
-        
-        // RSI overbought exit (if in profit)
-        if (changePct > 0.3 && rsi >= this.config.rsiOverbought) {
-            return { reason: 'RSI Overbought', changePct };
-        }
-        
-        return null;
-    }
 
-    // FIXED: Accurate fee calculation
-    calculateTradingCost(price, quantity, isMaker = false) {
-        const feeRate = isMaker ? this.config.makerFeePct : this.config.takerFeePct;
-        const tradeCost = price * quantity;
-        const fee = tradeCost * feeRate;
-        const slippage = tradeCost * this.config.slippagePct;
-        return fee + slippage;
-    }
+        const timestamp = Date.now();
+        const queryString = new URLSearchParams({
+            ...params,
+            timestamp
+        }).toString();
 
-    // FIXED: Proper position management
-    openPosition(price, candle) {
-        if (this.position) return;
-        
-        // Calculate position size based on available balance
-        const availableBalance = this.balance;
-        const positionValue = availableBalance * this.config.positionSizePct;
-        const quantity = positionValue / price;
-        
-        // Calculate entry cost (fees + slippage)
-        const entryCost = this.calculateTradingCost(price, quantity, false);
-        const totalCost = positionValue + entryCost;
-        
-        // Check if we have enough balance
-        if (totalCost > this.balance) {
-            console.log(`⚠️ Insufficient balance for trade: Need $${totalCost.toFixed(2)}, Have $${this.balance.toFixed(2)}`);
-            return;
-        }
-        
-        this.position = {
-            entryPrice: price,
-            quantity: quantity,
-            entryTime: new Date().toISOString(),
-            entryCost: entryCost,
-            candle: candle
-        };
-        
-        this.balance -= totalCost;
-        this.lastTradeCandle = candle;
-        
-        console.log(`🟢 BUY: ${quantity.toFixed(6)} ${this.config.symbol} at $${price.toFixed(4)} | Cost: $${totalCost.toFixed(2)} | Balance: $${this.balance.toFixed(2)}`);
-    }
+        const signature = this.createSignature(queryString);
+        const url = `https://api.binance.com${endpoint}?${queryString}&signature=${signature}`;
 
-    // FIXED: Proper position closing
-    closePosition(price, reason, candle) {
-        if (!this.position) return;
-        
-        const { entryPrice, quantity, entryCost } = this.position;
-        
-        // Calculate exit value
-        const exitValue = quantity * price;
-        const exitCost = this.calculateTradingCost(price, quantity, false);
-        const netExitValue = exitValue - exitCost;
-        
-        // Calculate P&L
-        const grossPnL = exitValue - (quantity * entryPrice);
-        const netPnL = grossPnL - entryCost - exitCost;
-        const pnlPct = (netPnL / (quantity * entryPrice)) * 100;
-        
-        // Update balance
-        this.balance += netExitValue;
-        this.totalPnL += netPnL;
-        
-        // Track trade
-        const trade = {
-            entryPrice: entryPrice,
-            exitPrice: price,
-            quantity: quantity,
-            pnl: netPnL,
-            pnlPct: pnlPct,
-            reason: reason,
-            duration: candle - this.position.candle,
-            fees: entryCost + exitCost
-        };
-        
-        this.trades.push(trade);
-        
-        // Update win/loss counters
-        if (netPnL > 0) {
-            this.wins++;
-            this.cooldownCounter = 0; // No cooldown after win
-        } else {
-            this.losses++;
-            this.cooldownCounter = this.config.cooldownPeriod; // Cooldown after loss
-        }
-        
-        console.log(`🔴 SELL: ${reason} at $${price.toFixed(4)} | P&L: ${pnlPct.toFixed(2)}% ($${netPnL.toFixed(2)}) | Balance: $${this.balance.toFixed(2)}`);
-        
-        this.position = null;
-    }
-
-    // Process market data
-    processCandle(price, candle) {
-        // Add to price history
-        this.priceData.push(price);
-        
-        // Keep reasonable history length
-        const maxLength = Math.max(this.config.emaSlow, 100);
-        if (this.priceData.length > maxLength) {
-            this.priceData = this.priceData.slice(-maxLength);
-        }
-        
-        // Need enough data for indicators
-        if (this.priceData.length < this.config.emaSlow) {
-            return;
-        }
-        
-        // Calculate indicators
-        const emaFastValues = this.calculateEMA(this.priceData, this.config.emaFast);
-        const emaMediumValues = this.calculateEMA(this.priceData, this.config.emaMedium);
-        const emaSlowValues = this.calculateEMA(this.priceData, this.config.emaSlow);
-        const rsiValues = this.calculateRSI(this.priceData, this.config.rsiPeriod);
-        
-        const lastIndex = this.priceData.length - 1;
-        const indicators = {
-            emaFast: emaFastValues[lastIndex],
-            emaMedium: emaMediumValues[lastIndex],
-            emaSlow: emaSlowValues[lastIndex],
-            rsi: rsiValues[lastIndex]
-        };
-        
-        // Check if all indicators are ready
-        if (!indicators.emaFast || !indicators.emaMedium || !indicators.emaSlow || !indicators.rsi) {
-            return;
-        }
-        
-        // Check daily loss limit
-        const currentValue = this.balance + (this.position ? this.position.quantity * price : 0);
-        const dailyPnL = ((currentValue - this.config.initialBalance) / this.config.initialBalance) * 100;
-        
-        if (dailyPnL <= this.config.maxDailyLoss) {
-            console.log(`🛑 Daily loss limit reached: ${dailyPnL.toFixed(2)}%`);
-            if (this.position) {
-                this.closePosition(price, 'Daily Loss Limit', candle);
+        const response = await fetch(url, {
+            headers: {
+                'X-MBX-APIKEY': this.config.apiKey
             }
-            return;
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(`Binance API Error: ${error.msg || 'Unknown error'}`);
         }
-        
-        // Trading logic
-        if (this.shouldBuy(price, indicators, candle)) {
-            this.openPosition(price, candle);
-        } else {
-            const sellSignal = this.shouldSell(price, indicators);
-            if (sellSignal) {
-                this.closePosition(price, sellSignal.reason, candle);
-            }
+
+        return await response.json();
+    }
+
+    // Get account balance (real trading)
+    async getAccountBalance() {
+        try {
+            const account = await this.makeAuthenticatedRequest('/api/v3/account');
+            const usdtBalance = account.balances.find(b => b.asset === 'USDT');
+            return parseFloat(usdtBalance?.free || 0);
+        } catch (error) {
+            this.log(`Failed to get account balance: ${error.message}`, 'ERROR');
+            return 0;
         }
-        
-        // Periodic status update (every 100 candles)
-        if (candle % 100 === 0) {
-            const totalTrades = this.wins + this.losses;
-            const winRate = totalTrades > 0 ? (this.wins / totalTrades) * 100 : 0;
-            const currentROI = ((currentValue - this.config.initialBalance) / this.config.initialBalance) * 100;
+    }
+
+    // Place market order (real trading)
+    async placeMarketOrder(side, quantity) {
+        try {
+            const order = await this.makeAuthenticatedRequest('/api/v3/order', {
+                symbol: this.config.symbol,
+                side: side.toUpperCase(),
+                type: 'MARKET',
+                quantity: quantity.toFixed(6)
+            });
             
-            console.log(`📊 Candle ${candle} | Price: $${price.toFixed(2)} | Balance: $${this.balance.toFixed(2)} | ROI: ${currentROI.toFixed(2)}% | Trades: ${totalTrades} | Win Rate: ${winRate.toFixed(1)}%`);
+            this.log(`Order placed: ${JSON.stringify(order)}`, 'TRADE');
+            return order;
+        } catch (error) {
+            this.log(`Failed to place ${side} order: ${error.message}`, 'ERROR');
+            throw error;
         }
     }
 
     // Get historical data from Binance REST API
-    async getHistoricalData() {
-        const symbol = this.config.symbol.toUpperCase();
+    async getHistoricalData(startDate = null, endDate = null, limit = 1000) {
+        const symbol = this.config.symbol.toLowerCase();
         const interval = this.config.timeframe;
-        const startTime = new Date(this.config.startDate).getTime();
-        const endTime = new Date(this.config.endDate).getTime();
         
-        const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&startTime=${startTime}&endTime=${endTime}&limit=1000`;
+        let url = `https://api.binance.com/api/v3/klines?symbol=${symbol.toUpperCase()}&interval=${interval}&limit=${limit}`;
+        
+        if (startDate && endDate) {
+            const startTime = new Date(startDate).getTime();
+            const endTime = new Date(endDate).getTime();
+            url += `&startTime=${startTime}&endTime=${endTime}`;
+        }
         
         try {
             const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            
             const data = await response.json();
             
             return data.map(kline => ({
@@ -358,132 +225,355 @@ class FixedCryptoScalper {
                 volume: parseFloat(kline[5])
             }));
         } catch (error) {
-            console.error('Error fetching historical data:', error);
+            this.log(`Error fetching historical data: ${error.message}`, 'ERROR');
             return [];
         }
     }
 
-    // Run backtest
-    async runBacktest() {
-        console.log('📊 Starting FIXED backtest...');
-        const data = await this.getHistoricalData();
+    // Get recent historical data for initialization
+    async getRecentHistoricalData() {
+        this.log('📥 Fetching recent historical data for indicator initialization...', 'INFO');
         
-        if (data.length === 0) {
-            console.error('No historical data available');
-            return;
-        }
-
-        console.log(`📈 Loaded ${data.length} candles for ${this.config.symbol}`);
+        const requiredCandles = Math.max(this.config.emaPeriod, this.config.rsiPeriod) + 50;
         
-        // Process each candle
-        for (let i = 0; i < data.length; i++) {
-            this.processCandle(data[i].close, i);
-        }
-
-        // Close any remaining position
-        if (this.position) {
-            const finalPrice = data[data.length - 1].close;
-            this.closePosition(finalPrice, 'Backtest End', data.length - 1);
-        }
-
-        // Calculate detailed results
-        const finalBalance = this.balance;
-        const roi = ((finalBalance - this.config.initialBalance) / this.config.initialBalance) * 100;
-        const totalTrades = this.wins + this.losses;
-        const winRate = totalTrades > 0 ? (this.wins / totalTrades) * 100 : 0;
-        
-        // Calculate additional metrics
-        const avgWin = this.trades.filter(t => t.pnl > 0).reduce((sum, t) => sum + t.pnl, 0) / (this.wins || 1);
-        const avgLoss = Math.abs(this.trades.filter(t => t.pnl < 0).reduce((sum, t) => sum + t.pnl, 0)) / (this.losses || 1);
-        const profitFactor = avgWin / (avgLoss || 1) * (this.wins / (this.losses || 1));
-        const totalFees = this.trades.reduce((sum, t) => sum + t.fees, 0);
-        
-        console.log('\n📋 FIXED BACKTEST RESULTS:');
-        console.log('=====================================');
-        console.log(`Initial Balance: $${this.config.initialBalance.toFixed(2)}`);
-        console.log(`Final Balance: $${finalBalance.toFixed(2)}`);
-        console.log(`Net P&L: $${(finalBalance - this.config.initialBalance).toFixed(2)}`);
-        console.log(`ROI: ${roi.toFixed(2)}%`);
-        console.log(`Total Trades: ${totalTrades}`);
-        console.log(`Wins: ${this.wins} | Losses: ${this.losses}`);
-        console.log(`Win Rate: ${winRate.toFixed(1)}%`);
-        console.log(`Average Win: $${avgWin.toFixed(2)}`);
-        console.log(`Average Loss: $${avgLoss.toFixed(2)}`);
-        console.log(`Profit Factor: ${profitFactor.toFixed(2)}`);
-        console.log(`Total Fees Paid: $${totalFees.toFixed(2)}`);
-        console.log(`Risk-Reward Ratio: ${Math.abs(this.config.tp1Pct / this.config.slPct).toFixed(1)}:1`);
-        
-        if (totalTrades > 0) {
-            const avgHoldTime = this.trades.reduce((sum, t) => sum + t.duration, 0) / totalTrades;
-            console.log(`Average Hold Time: ${avgHoldTime.toFixed(1)} candles`);
-            console.log(`Trades per Day: ${(totalTrades / ((new Date(this.config.endDate) - new Date(this.config.startDate)) / (1000 * 60 * 60 * 24))).toFixed(1)}`);
-        }
-        
-        // Show recent trades
-        if (this.trades.length > 0) {
-            console.log('\n🔄 Last 5 Trades:');
-            this.trades.slice(-5).forEach((trade, i) => {
-                console.log(`${i + 1}. ${trade.reason}: ${trade.pnlPct.toFixed(2)}% ($${trade.pnl.toFixed(2)}) - Fees: $${trade.fees.toFixed(3)}`);
-            });
+        try {
+            const data = await this.getHistoricalData(null, null, requiredCandles);
+            
+            if (data.length === 0) {
+                this.log('❌ Failed to fetch recent historical data', 'ERROR');
+                return false;
+            }
+            
+            this.priceData = data.map(d => d.close);
+            
+            this.log(`✅ Loaded ${this.priceData.length} recent candles for indicator calculation`, 'INFO');
+            this.log(`📊 Price range: $${Math.min(...this.priceData).toFixed(4)} - $${Math.max(...this.priceData).toFixed(4)}`, 'INFO');
+            
+            const emas = this.calculateEMA(this.priceData, this.config.emaPeriod);
+            const rsis = this.calculateRSI(this.priceData, this.config.rsiPeriod);
+            
+            const currentPrice = this.priceData[this.priceData.length - 1];
+            const currentEMA = emas[emas.length - 1];
+            const currentRSI = rsis[rsis.length - 1];
+            
+            this.log(`📈 Current indicators - Price: $${currentPrice.toFixed(4)} | EMA(${this.config.emaPeriod}): $${currentEMA.toFixed(4)} | RSI(${this.config.rsiPeriod}): ${currentRSI.toFixed(2)}`, 'INFO');
+            
+            return true;
+        } catch (error) {
+            this.log(`❌ Error fetching recent historical data: ${error.message}`, 'ERROR');
+            return false;
         }
     }
 
-    // Start forward testing with WebSocket
-    startForwardTest() {
-        console.log('🚀 Starting FIXED forward test...');
-        
-        const symbol = this.config.symbol.toLowerCase();
-        const wsUrl = `wss://stream.binance.com:9443/ws/${symbol}@kline_${this.config.timeframe}`;
-        
-        this.ws = new WebSocket(wsUrl);
-        let candleCount = 0;
-        
-        this.ws.on('open', () => {
-            console.log(`📡 Connected to Binance WebSocket for ${this.config.symbol}`);
-        });
+    // Process trade signal
+    async processSignal(price, ema, rsi) {
+        if (isNaN(price) || isNaN(ema) || isNaN(rsi)) return;
 
-        this.ws.on('message', (data) => {
-            const message = JSON.parse(data);
-            const kline = message.k;
+        // BUY signal
+        if (this.holdings === 0 && price > ema && rsi <= this.config.rsiEntry) {
+            const amount = this.balance / price;
             
-            if (kline.x) { // Only process completed candles
-                const price = parseFloat(kline.c);
-                this.processCandle(price, candleCount++);
+            if (this.config.realTrading) {
+                try {
+                    await this.placeMarketOrder('BUY', amount);
+                    this.holdings = amount;
+                    this.entryPrice = price * (1 + this.config.slippagePct);
+                    this.entryTime = new Date();
+                    this.balance = 0;
+                } catch (error) {
+                    this.log(`❌ Failed to execute BUY order: ${error.message}`, 'ERROR');
+                    return;
+                }
+            } else {
+                this.holdings = amount;
+                this.entryPrice = price * (1 + this.config.slippagePct);
+                this.entryTime = new Date();
+                this.balance = 0;
             }
-        });
+            
+            this.log(`🟢 BUY: ${amount.toFixed(6)} ${this.config.symbol} at $${price.toFixed(4)} | RSI: ${rsi.toFixed(2)} | EMA: ${ema.toFixed(4)} | Mode: ${this.config.realTrading ? 'REAL' : 'PAPER'}`, 'TRADE');
+            return;
+        }
 
-        this.ws.on('error', (error) => {
-            console.error('WebSocket error:', error);
-        });
+        // SELL signals
+        if (this.holdings > 0) {
+            const changePct = ((price - this.entryPrice) / this.entryPrice) * 100;
+            let shouldSell = false;
+            let reason = '';
 
-        this.ws.on('close', () => {
-            console.log('WebSocket connection closed');
-        });
+            if (changePct >= this.config.tp2Pct || rsi >= this.config.rsiExit2) {
+                shouldSell = true;
+                reason = changePct >= this.config.tp2Pct ? 'TP2' : 'RSI Exit 2';
+            } else if (changePct >= this.config.tp1Pct || rsi >= this.config.rsiExit1) {
+                shouldSell = true;
+                reason = changePct >= this.config.tp1Pct ? 'TP1' : 'RSI Exit 1';
+            } else if (changePct <= this.config.slPct) {
+                shouldSell = true;
+                reason = 'Stop Loss';
+            }
 
+            if (shouldSell) {
+                const sellPrice = price * (1 - this.config.feePct);
+                
+                if (this.config.realTrading) {
+                    try {
+                        await this.placeMarketOrder('SELL', this.holdings);
+                        this.balance = this.holdings * sellPrice;
+                        this.holdings = 0;
+                    } catch (error) {
+                        this.log(`❌ Failed to execute SELL order: ${error.message}`, 'ERROR');
+                        return;
+                    }
+                } else {
+                    this.balance = this.holdings * sellPrice;
+                    this.holdings = 0;
+                }
+                
+                if (changePct > 0) {
+                    this.wins++;
+                } else {
+                    this.losses++;
+                }
+
+                const holdTime = this.entryTime ? Math.round((new Date() - this.entryTime) / 60000) : 0;
+                this.log(`🔴 SELL: ${reason} at $${price.toFixed(4)} | P&L: ${changePct.toFixed(2)}% | Balance: $${this.balance.toFixed(2)} | Hold: ${holdTime}min | Mode: ${this.config.realTrading ? 'REAL' : 'PAPER'}`, 'TRADE');
+                
+                this.entryTime = null;
+            }
+        }
+    }
+
+    // Setup heartbeat monitoring
+    setupHeartbeat() {
+        if (this.heartbeatTimer) {
+            clearInterval(this.heartbeatTimer);
+        }
+        
+        this.heartbeatTimer = setInterval(() => {
+            if (this.isConnected && this.lastDataTime) {
+                const timeSinceLastData = Date.now() - this.lastDataTime;
+                if (timeSinceLastData > this.config.dataTimeoutMs) {
+                    this.log(`⚠️ No data received for ${Math.round(timeSinceLastData / 1000)}s. Reconnecting...`, 'WARNING');
+                    this.reconnectWebSocket();
+                }
+            }
+        }, this.config.heartbeatInterval);
+    }
+
+    // Connect to WebSocket
+    async connectWebSocket() {
+        if (this.isConnecting) return;
+        
+        this.isConnecting = true;
+        
+        try {
+            const symbol = this.config.symbol.toLowerCase();
+            const wsUrl = `wss://stream.binance.com:9443/ws/${symbol}@kline_${this.config.timeframe}`;
+            
+            this.log(`🔌 Attempting WebSocket connection to ${wsUrl}`, 'INFO');
+            
+            this.ws = new WebSocket(wsUrl);
+            
+            this.ws.on('open', () => {
+                this.log(`📡 WebSocket connected successfully for ${this.config.symbol}`, 'SUCCESS');
+                this.isConnected = true;
+                this.isConnecting = false;
+                this.reconnectAttempts = 0;
+                this.lastDataTime = Date.now();
+                this.setupHeartbeat();
+            });
+
+            this.ws.on('message', (data) => {
+                try {
+                    this.lastDataTime = Date.now();
+                    const message = JSON.parse(data);
+                    const kline = message.k;
+                    
+                    if (kline.x) { // Only process completed candles
+                        this.processKlineData(kline);
+                    }
+                } catch (error) {
+                    this.log(`Error processing WebSocket message: ${error.message}`, 'ERROR');
+                }
+            });
+
+            this.ws.on('error', (error) => {
+                this.log(`WebSocket error: ${error.message}`, 'ERROR');
+                this.isConnected = false;
+                this.isConnecting = false;
+            });
+
+            this.ws.on('close', (code, reason) => {
+                this.log(`WebSocket connection closed. Code: ${code}, Reason: ${reason || 'Unknown'}`, 'WARNING');
+                this.isConnected = false;
+                this.isConnecting = false;
+                
+                if (this.shouldReconnect) {
+                    this.scheduleReconnect();
+                }
+            });
+
+        } catch (error) {
+            this.log(`Failed to create WebSocket connection: ${error.message}`, 'ERROR');
+            this.isConnecting = false;
+            if (this.shouldReconnect) {
+                this.scheduleReconnect();
+            }
+        }
+    }
+
+    // Process incoming kline data
+    async processKlineData(kline) {
+        const price = parseFloat(kline.c);
+        
+        this.priceData.push(price);
+        
+        const maxLength = Math.max(this.config.emaPeriod, this.config.rsiPeriod) + 50;
+        if (this.priceData.length > maxLength) {
+            this.priceData = this.priceData.slice(-maxLength);
+        }
+
+        const emas = this.calculateEMA(this.priceData, this.config.emaPeriod);
+        const rsis = this.calculateRSI(this.priceData, this.config.rsiPeriod);
+        
+        const currentEMA = emas[emas.length - 1];
+        const currentRSI = rsis[rsis.length - 1];
+        
+        if (currentEMA && currentRSI) {
+            this.log(`📊 ${new Date().toLocaleTimeString()} | Price: $${price.toFixed(4)} | RSI: ${currentRSI.toFixed(2)} | EMA: ${currentEMA.toFixed(4)} | Holdings: ${this.holdings.toFixed(6)}`, 'DATA');
+            await this.processSignal(price, currentEMA, currentRSI);
+        }
+    }
+
+    // Schedule reconnection attempt
+    scheduleReconnect() {
+        if (!this.shouldReconnect) return;
+        
+        this.reconnectAttempts++;
+        
+        if (this.config.maxReconnectAttempts > 0 && this.reconnectAttempts > this.config.maxReconnectAttempts) {
+            this.log(`❌ Maximum reconnection attempts (${this.config.maxReconnectAttempts}) exceeded. Stopping.`, 'ERROR');
+            this.shouldReconnect = false;
+            return;
+        }
+        
+        const delay = Math.min(this.config.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1), 60000); // Exponential backoff, max 1 minute
+        
+        this.log(`🔄 Scheduling reconnection attempt ${this.reconnectAttempts} in ${delay}ms`, 'INFO');
+        
+        setTimeout(async () => {
+            if (this.shouldReconnect && !this.isConnected) {
+                this.log(`🔄 Reconnection attempt ${this.reconnectAttempts}`, 'INFO');
+                
+                // Refresh historical data on reconnect for accuracy
+                await this.getRecentHistoricalData();
+                await this.connectWebSocket();
+            }
+        }, delay);
+    }
+
+    // Force reconnection
+    async reconnectWebSocket() {
+        this.log('🔄 Forcing WebSocket reconnection...', 'INFO');
+        
+        if (this.ws) {
+            this.ws.removeAllListeners();
+            this.ws.terminate();
+            this.ws = null;
+        }
+        
+        this.isConnected = false;
+        this.isConnecting = false;
+        
+        if (this.heartbeatTimer) {
+            clearInterval(this.heartbeatTimer);
+            this.heartbeatTimer = null;
+        }
+        
+        await this.connectWebSocket();
+    }
+
+    // Run backtest
+    async runBacktest() {
+        this.log('📊 Starting backtest...', 'INFO');
+        const data = await this.getHistoricalData(this.config.startDate, this.config.endDate, 1000);
+        
+        if (data.length === 0) {
+            this.log('No historical data available', 'ERROR');
+            return;
+        }
+
+        this.log(`📈 Loaded ${data.length} candles for ${this.config.symbol}`, 'INFO');
+        
+        const prices = data.map(d => d.close);
+        const emas = this.calculateEMA(prices, this.config.emaPeriod);
+        const rsis = this.calculateRSI(prices, this.config.rsiPeriod);
+
+        for (let i = 0; i < data.length; i++) {
+            if (emas[i] && rsis[i]) {
+                await this.processSignal(prices[i], emas[i], rsis[i]);
+            }
+        }
+
+        const finalPrice = prices[prices.length - 1];
+        const finalBalance = this.balance + (this.holdings * finalPrice);
+        const roi = ((finalBalance - this.config.initialBalance) / this.config.initialBalance) * 100;
+
+        this.log('\n📋 BACKTEST RESULTS:', 'RESULT');
+        this.log(`Initial Balance: $${this.config.initialBalance}`, 'RESULT');
+        this.log(`Final Balance: $${finalBalance.toFixed(2)}`, 'RESULT');
+        this.log(`ROI: ${roi.toFixed(2)}%`, 'RESULT');
+        this.log(`Wins: ${this.wins}`, 'RESULT');
+        this.log(`Losses: ${this.losses}`, 'RESULT');
+        this.log(`Win Rate: ${this.wins + this.losses > 0 ? ((this.wins / (this.wins + this.losses)) * 100).toFixed(1) : 0}%`, 'RESULT');
+    }
+
+    // Start forward testing
+    async startForwardTest() {
+        this.log('🚀 Starting forward test with live data...', 'INFO');
+        
+        if (this.config.realTrading) {
+            this.log('⚠️ REAL TRADING MODE ENABLED - This will use your actual Binance account!', 'WARNING');
+            
+            try {
+                const accountBalance = await this.getAccountBalance();
+                this.balance = accountBalance;
+                this.log(`💰 Account Balance: $${accountBalance.toFixed(2)}`, 'INFO');
+            } catch (error) {
+                this.log(`❌ Failed to connect to Binance account: ${error.message}`, 'ERROR');
+                return;
+            }
+        }
+        
+        const dataLoaded = await this.getRecentHistoricalData();
+        if (!dataLoaded) {
+            this.log('❌ Failed to load historical data. Exiting...', 'ERROR');
+            return;
+        }
+        
+        await this.connectWebSocket();
+        
         // Handle graceful shutdown
         process.on('SIGINT', () => {
-            console.log('\n🛑 Shutting down...');
+            this.log('\n🛑 Shutdown signal received...', 'INFO');
+            this.shouldReconnect = false;
+            
             if (this.ws) {
                 this.ws.close();
             }
             
-            // Close any open position
-            if (this.position && this.priceData.length > 0) {
-                const lastPrice = this.priceData[this.priceData.length - 1];
-                this.closePosition(lastPrice, 'Shutdown', candleCount);
+            if (this.heartbeatTimer) {
+                clearInterval(this.heartbeatTimer);
             }
             
-            const finalBalance = this.balance;
+            const finalBalance = this.balance + (this.holdings * (this.priceData[this.priceData.length - 1] || 0));
             const roi = ((finalBalance - this.config.initialBalance) / this.config.initialBalance) * 100;
-            const totalTrades = this.wins + this.losses;
-            const winRate = totalTrades > 0 ? (this.wins / totalTrades) * 100 : 0;
             
-            console.log('\n📋 FORWARD TEST RESULTS:');
-            console.log(`Final Balance: $${finalBalance.toFixed(2)}`);
-            console.log(`ROI: ${roi.toFixed(2)}%`);
-            console.log(`Total Trades: ${totalTrades}`);
-            console.log(`Wins: ${this.wins} | Losses: ${this.losses}`);
-            console.log(`Win Rate: ${winRate.toFixed(1)}%`);
+            this.log('\n📋 FORWARD TEST RESULTS:', 'RESULT');
+            this.log(`Final Balance: $${finalBalance.toFixed(2)}`, 'RESULT');
+            this.log(`ROI: ${roi.toFixed(2)}%`, 'RESULT');
+            this.log(`Wins: ${this.wins}`, 'RESULT');
+            this.log(`Losses: ${this.losses}`, 'RESULT');
             
             process.exit(0);
         });
@@ -494,59 +584,42 @@ class FixedCryptoScalper {
         if (this.config.backtest) {
             await this.runBacktest();
         } else {
-            this.startForwardTest();
+            await this.startForwardTest();
         }
     }
 }
 
-// FIXED Configuration with proper risk management
+// Configuration - modify these parameters
 const config = {
     symbol: 'AVAXUSDT',
-    timeframe: '3m',  // 3-minute for better signal quality
-    startDate: '2025-09-10',
-    endDate: '2025-09-19',
-    initialBalance: 898,
-    
-    // Proper EMA periods for trend detection
-    emaFast: 12,
-    emaMedium: 26,
-    emaSlow: 50,
-    
-    // Standard RSI settings
+    timeframe: '3m',
+    startDate: '2025-09-05',
+    endDate: '2025-09-06',
+    initialBalance: 890,
+    emaPeriod: 100,
     rsiPeriod: 14,
-    rsiOverbought: 75,
-    rsiOversold: 35,
+    rsiEntry: 45,
+    tp1Pct: 1.2,
+    tp2Pct: 2.0,
+    slPct: -0.6,
+    feePct: 0.001,
+    slippagePct: 0.0005,
+    rsiExit1: 80,
+    rsiExit2: 85,
+    backtest: false,  // Set to false for forward testing
     
-    // FIXED: Proper risk-reward ratio (2:1 minimum)
-    tp1Pct: 1.2,     // 1% profit target
-    tp2Pct: 2.0,     // 2% profit target
-    slPct: -0.5,     // 0.5% stop loss = 2:1 risk-reward
+    // Real Trading Configuration (DANGEROUS - USE WITH CAUTION!)
+    realTrading: false,  // Set to true to enable real trading
+    apiKey: '',  // Your Binance API Key
+    apiSecret: '',  // Your Binance API Secret
     
-    // REALISTIC fees (Binance spot trading)
-    makerFeePct: 0.001,   // 0.01% maker fee (with BNB discount)
-    takerFeePct: 0.001,   // 0.01% taker fee (with BNB discount)
-    slippagePct: 0.0001,   // Minimal slippage with limit orders
-    
-    // Position sizing - use 95% of balance per trade
-    positionSizePct: 0.95,
-    
-    // Risk management
-    maxDailyLoss: -3,      // Stop at 3% daily loss
-    cooldownPeriod: 5,     // Wait 5 candles after loss
-    
-    backtest: true
+    // Connection Management
+    maxReconnectAttempts: -1,  // -1 for infinite attempts
+    reconnectDelay: 5000,  // Initial reconnection delay in ms
+    heartbeatInterval: 30000,  // Check connection every 30 seconds
+    dataTimeoutMs: 120000  // 2 minutes without data triggers reconnection
 };
 
-console.log('🔧 FIXED Crypto Trading Bot');
-console.log('===========================');
-console.log('Key Fixes Applied:');
-console.log('✅ Proper risk-reward ratio (2:1)');
-console.log('✅ Realistic fees and slippage');
-console.log('✅ Accurate P&L calculation');
-console.log('✅ Better entry/exit conditions');
-console.log('✅ Position sizing optimization');
-console.log('✅ Cooldown after losses');
-console.log('===========================\n');
-
-const bot = new FixedCryptoScalper(config);
-bot.run().catch(console.error);
+// Run the tester
+const tester = new CryptoScalpingTester(config);
+tester.run().catch(console.error);
