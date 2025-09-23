@@ -2,64 +2,27 @@ const WebSocket = require('ws');
 const fs = require('fs');
 const path = require('path');
 
-class EnhancedCryptoScalpingTester {
+class CryptoScalpingTester {
     constructor(config = {}) {
         this.config = {
             symbol: config.symbol || 'AVAXUSDT',
-            timeframe: config.timeframe || '3m',
+            timeframe: config.timeframe || '5m',
             startDate: config.startDate || '2025-09-01',
             endDate: config.endDate || '2025-09-19',
             initialBalance: config.initialBalance || 1000,
-            
-            // OPTIMIZED: Core strategy parameters (same algorithm)
-            emaPeriod: config.emaPeriod || 21,        // Optimal: 21 for better trend detection
-            rsiPeriod: config.rsiPeriod || 14,        // Standard RSI period
-            rsiEntry: config.rsiEntry || 40,          // Optimal: 40 for earlier entries
-            
-            // OPTIMIZED: Risk-reward parameters
-            tp1Pct: config.tp1Pct || 1.5,            // Optimal: 1.5% for first target
-            tp2Pct: config.tp2Pct || 2.5,            // Optimal: 2.5% for second target
-            slPct: config.slPct || -0.7,             // Optimal: -0.7% tight stop loss
-            
-            // OPTIMIZED: Exit parameters
-            rsiExit1: config.rsiExit1 || 75,          // Optimal: 75 for first RSI exit
-            rsiExit2: config.rsiExit2 || 80,          // Optimal: 80 for second RSI exit
-            
-            // OPTIMIZED: Trading costs
-            feePct: config.feePct || 0.001,           // 0.1% realistic fee
-            slippagePct: config.slippagePct || 0.0003, // 0.03% minimal slippage
-            
-            // NEW: Advanced Risk Management
-            maxPositionSize: config.maxPositionSize || 0.85,     // Use max 85% of balance
-            maxDailyLoss: config.maxDailyLoss || -4,             // Stop at 4% daily loss
-            maxDrawdown: config.maxDrawdown || -8,               // Stop at 8% total drawdown
-            maxConsecutiveLosses: config.maxConsecutiveLosses || 3, // Stop after 3 losses in a row
-            
-            // NEW: Position scaling based on confidence
-            basePositionSize: config.basePositionSize || 0.3,    // Base position: 30% of balance
-            maxConfidenceMultiplier: config.maxConfidenceMultiplier || 2.5, // Max 2.5x base position
-            
-            // NEW: Dynamic risk adjustment
-            volatilityLookback: config.volatilityLookback || 20,  // Look back 20 periods for volatility
-            minVolatility: config.minVolatility || 0.5,          // Min volatility threshold
-            maxVolatility: config.maxVolatility || 3.0,          // Max volatility threshold
-            
-            // NEW: Time-based risk management
-            tradingHours: config.tradingHours || { start: 6, end: 22 }, // Trade 6 AM to 10 PM UTC
-            avoidWeekends: config.avoidWeekends || false,         // Skip weekend trading
-            
-            // NEW: Portfolio protection
-            profitProtectionLevel: config.profitProtectionLevel || 50, // Protect profits above 50%
-            trailingStopDistance: config.trailingStopDistance || 2,    // 2% trailing stop when in big profit
-            
-            // NEW: Market condition filters
-            minEMADistance: config.minEMADistance || 0.2,         // Price must be 0.2% above EMA
-            rsiRangeFilter: config.rsiRangeFilter || { min: 20, max: 80 }, // Only trade RSI 20-80 range
-            
+            emaPeriod: config.emaPeriod || 100,
+            rsiPeriod: config.rsiPeriod || 14,
+            rsiEntry: config.rsiEntry || 45,
+            tp1Pct: config.tp1Pct || 1.2,
+            tp2Pct: config.tp2Pct || 2.0,
+            slPct: config.slPct || -1.2,
+            feePct: config.feePct || 0.00075,
+            slippagePct: config.slippagePct || 0.0005,
+            rsiExit1: config.rsiExit1 || 100,
+            rsiExit2: config.rsiExit2 || 85,
             backtest: config.backtest || false
         };
         
-        // Core trading state
         this.balance = this.config.initialBalance;
         this.holdings = 0;
         this.entryPrice = 0;
@@ -67,40 +30,10 @@ class EnhancedCryptoScalpingTester {
         this.losses = 0;
         this.priceData = [];
         this.ws = null;
-        
-        // NEW: Advanced risk management state
-        this.dailyStartBalance = this.config.initialBalance;
-        this.peakBalance = this.config.initialBalance;
-        this.consecutiveLosses = 0;
-        this.totalTrades = 0;
-        this.dailyTrades = 0;
-        this.lastTradeTime = null;
-        this.tradingPaused = false;
-        this.pauseReason = '';
-        
-        // NEW: Performance tracking
-        this.trades = [];
-        this.dailyStats = [];
-        this.riskMetrics = {
-            maxDrawdown: 0,
-            sharpeRatio: 0,
-            winRate: 0,
-            avgWin: 0,
-            avgLoss: 0,
-            profitFactor: 0
-        };
-        
-        // NEW: Market condition tracking
-        this.volatilityHistory = [];
-        this.trendStrength = 0;
-        
-        console.log('🛡️ Enhanced Risk Management Enabled');
-        console.log(`Max Daily Loss: ${this.config.maxDailyLoss}%`);
-        console.log(`Max Drawdown: ${this.config.maxDrawdown}%`);
-        console.log(`Position Scaling: ${this.config.basePositionSize * 100}% - ${this.config.basePositionSize * this.config.maxConfidenceMultiplier * 100}%`);
+        this.isWarmupComplete = false;
     }
 
-    // Calculate EMA (unchanged algorithm)
+    // Calculate EMA
     calculateEMA(data, period) {
         if (data.length < period) return data.map(() => null);
         
@@ -115,7 +48,7 @@ class EnhancedCryptoScalpingTester {
         return ema;
     }
 
-    // Calculate RSI (unchanged algorithm)
+    // Calculate RSI
     calculateRSI(data, period = 14) {
         if (data.length < period + 1) return data.map(() => null);
         
@@ -153,288 +86,7 @@ class EnhancedCryptoScalpingTester {
         return rsi;
     }
 
-    // NEW: Calculate market volatility
-    calculateVolatility(prices, period = 20) {
-        if (prices.length < period) return 0;
-        
-        const recentPrices = prices.slice(-period);
-        const returns = [];
-        
-        for (let i = 1; i < recentPrices.length; i++) {
-            returns.push((recentPrices[i] - recentPrices[i-1]) / recentPrices[i-1]);
-        }
-        
-        const mean = returns.reduce((sum, ret) => sum + ret, 0) / returns.length;
-        const variance = returns.reduce((sum, ret) => sum + Math.pow(ret - mean, 2), 0) / returns.length;
-        
-        return Math.sqrt(variance) * 100; // Convert to percentage
-    }
-
-    // NEW: Calculate confidence score for position sizing
-    calculateConfidenceScore(price, ema, rsi, volatility) {
-        let confidence = 1.0;
-        
-        // EMA distance factor (stronger signal = higher confidence)
-        const emaDistance = ((price - ema) / ema) * 100;
-        if (emaDistance > this.config.minEMADistance * 2) {
-            confidence += 0.3;
-        } else if (emaDistance > this.config.minEMADistance) {
-            confidence += 0.1;
-        }
-        
-        // RSI strength factor
-        if (rsi <= 30) {
-            confidence += 0.4; // Very oversold = high confidence
-        } else if (rsi <= 35) {
-            confidence += 0.2;
-        }
-        
-        // Volatility factor (moderate volatility preferred)
-        if (volatility >= this.config.minVolatility && volatility <= this.config.maxVolatility) {
-            confidence += 0.2;
-        } else if (volatility > this.config.maxVolatility) {
-            confidence -= 0.3; // High volatility = lower confidence
-        }
-        
-        // Recent performance factor
-        if (this.consecutiveLosses === 0 && this.wins > this.losses) {
-            confidence += 0.1;
-        } else if (this.consecutiveLosses >= 2) {
-            confidence -= 0.2;
-        }
-        
-        return Math.max(0.5, Math.min(confidence, this.config.maxConfidenceMultiplier));
-    }
-
-    // NEW: Check if trading is allowed
-    canTrade(currentTime = new Date()) {
-        // Check if trading is paused
-        if (this.tradingPaused) {
-            return false;
-        }
-        
-        // Check trading hours
-        const hour = currentTime.getUTCHours();
-        if (hour < this.config.tradingHours.start || hour >= this.config.tradingHours.end) {
-            return false;
-        }
-        
-        // Check weekend trading
-        if (this.config.avoidWeekends) {
-            const day = currentTime.getUTCDay();
-            if (day === 0 || day === 6) { // Sunday or Saturday
-                return false;
-            }
-        }
-        
-        // Check daily loss limit
-        const currentValue = this.balance + (this.holdings * (this.priceData[this.priceData.length - 1] || 0));
-        const dailyPnL = ((currentValue - this.dailyStartBalance) / this.dailyStartBalance) * 100;
-        if (dailyPnL <= this.config.maxDailyLoss) {
-            this.pauseTrading(`Daily loss limit reached: ${dailyPnL.toFixed(2)}%`);
-            return false;
-        }
-        
-        // Check max drawdown
-        const totalDrawdown = ((currentValue - this.peakBalance) / this.peakBalance) * 100;
-        if (totalDrawdown <= this.config.maxDrawdown) {
-            this.pauseTrading(`Max drawdown reached: ${totalDrawdown.toFixed(2)}%`);
-            return false;
-        }
-        
-        // Check consecutive losses
-        if (this.consecutiveLosses >= this.config.maxConsecutiveLosses) {
-            this.pauseTrading(`Max consecutive losses: ${this.consecutiveLosses}`);
-            return false;
-        }
-        
-        return true;
-    }
-
-    // NEW: Pause trading with reason
-    pauseTrading(reason) {
-        if (!this.tradingPaused) {
-            this.tradingPaused = true;
-            this.pauseReason = reason;
-            console.log(`🛑 TRADING PAUSED: ${reason}`);
-        }
-    }
-
-    // NEW: Calculate dynamic position size
-    calculatePositionSize(confidence, currentPrice) {
-        const currentValue = this.balance + (this.holdings * currentPrice);
-        
-        // Base position size
-        let positionSize = this.config.basePositionSize * confidence;
-        
-        // Adjust for recent performance
-        if (this.consecutiveLosses > 0) {
-            positionSize *= Math.pow(0.8, this.consecutiveLosses); // Reduce size after losses
-        }
-        
-        // Respect maximum position size
-        positionSize = Math.min(positionSize, this.config.maxPositionSize);
-        
-        // Calculate actual amount
-        const maxAmount = (currentValue * positionSize) / currentPrice;
-        
-        return maxAmount;
-    }
-
-    // NEW: Enhanced trade logging
-    logTrade(type, price, amount, reason, pnl = null) {
-        const trade = {
-            timestamp: new Date().toISOString(),
-            type: type,
-            price: price,
-            amount: amount,
-            reason: reason,
-            pnl: pnl,
-            balance: this.balance,
-            consecutiveLosses: this.consecutiveLosses
-        };
-        
-        this.trades.push(trade);
-        this.totalTrades++;
-        this.dailyTrades++;
-        
-        if (type === 'SELL' && pnl !== null) {
-            if (pnl > 0) {
-                this.wins++;
-                this.consecutiveLosses = 0;
-                // Update peak balance for drawdown calculation
-                const currentValue = this.balance;
-                if (currentValue > this.peakBalance) {
-                    this.peakBalance = currentValue;
-                }
-            } else {
-                this.losses++;
-                this.consecutiveLosses++;
-            }
-        }
-    }
-
-    // Enhanced process signal with risk management (same core algorithm)
-    processSignal(price, ema, rsi) {
-        if (isNaN(price) || isNaN(ema) || isNaN(rsi)) return;
-
-        // NEW: Calculate market conditions
-        const volatility = this.calculateVolatility(this.priceData, this.config.volatilityLookback);
-        this.volatilityHistory.push(volatility);
-        if (this.volatilityHistory.length > 50) {
-            this.volatilityHistory.shift();
-        }
-
-        // NEW: Check if trading is allowed
-        if (!this.canTrade()) {
-            return;
-        }
-
-        // SAME ALGORITHM: BUY signal (with enhanced risk management)
-        if (this.holdings === 0 && price > ema && rsi <= this.config.rsiEntry) {
-            // NEW: Additional filters
-            const emaDistance = ((price - ema) / ema) * 100;
-            if (emaDistance < this.config.minEMADistance) {
-                console.log(`⚠️ EMA distance too small: ${emaDistance.toFixed(2)}%`);
-                return;
-            }
-            
-            if (rsi < this.config.rsiRangeFilter.min || rsi > this.config.rsiRangeFilter.max) {
-                console.log(`⚠️ RSI outside trading range: ${rsi.toFixed(2)}`);
-                return;
-            }
-            
-            // NEW: Calculate confidence and position size
-            const confidence = this.calculateConfidenceScore(price, ema, rsi, volatility);
-            const amount = this.calculatePositionSize(confidence, price);
-            
-            if (amount * price > this.balance) {
-                console.log(`⚠️ Insufficient balance for trade`);
-                return;
-            }
-            
-            this.holdings = amount;
-            this.entryPrice = price * (1 + this.config.slippagePct);
-            this.balance -= amount * price;
-            
-            this.logTrade('BUY', price, amount, `RSI: ${rsi.toFixed(2)}, EMA: ${emaDistance.toFixed(2)}%, Conf: ${confidence.toFixed(2)}`);
-            console.log(`🟢 BUY: ${amount.toFixed(6)} ${this.config.symbol} at $${price.toFixed(4)} | RSI: ${rsi.toFixed(2)} | EMA+${emaDistance.toFixed(2)}% | Confidence: ${confidence.toFixed(2)}x | Vol: ${volatility.toFixed(1)}%`);
-            return;
-        }
-
-        // SAME ALGORITHM: SELL signals (with enhanced exit logic)
-        if (this.holdings > 0) {
-            const changePct = ((price - this.entryPrice) / this.entryPrice) * 100;
-            let shouldSell = false;
-            let reason = '';
-
-            // NEW: Trailing stop for big profits
-            if (changePct > this.config.profitProtectionLevel) {
-                const trailingStop = changePct - this.config.trailingStopDistance;
-                if (changePct < trailingStop) {
-                    shouldSell = true;
-                    reason = 'Trailing Stop';
-                }
-            }
-
-            // SAME ALGORITHM: Original exit conditions
-            if (!shouldSell) {
-                if (changePct >= this.config.tp2Pct || rsi >= this.config.rsiExit2) {
-                    shouldSell = true;
-                    reason = changePct >= this.config.tp2Pct ? 'TP2' : 'RSI Exit 2';
-                } else if (changePct >= this.config.tp1Pct || rsi >= this.config.rsiExit1) {
-                    shouldSell = true;
-                    reason = changePct >= this.config.tp1Pct ? 'TP1' : 'RSI Exit 1';
-                } else if (changePct <= this.config.slPct) {
-                    shouldSell = true;
-                    reason = 'Stop Loss';
-                }
-            }
-
-            // NEW: Emergency exits
-            if (!shouldSell && volatility > this.config.maxVolatility * 1.5) {
-                shouldSell = true;
-                reason = 'High Volatility Exit';
-            }
-
-            if (shouldSell) {
-                const saleValue = this.holdings * price * (1 - this.config.feePct);
-                const pnl = saleValue - (this.holdings * this.entryPrice);
-                
-                this.balance += saleValue;
-                this.holdings = 0;
-                
-                this.logTrade('SELL', price, this.holdings, reason, pnl);
-                
-                console.log(`🔴 SELL: ${reason} at $${price.toFixed(4)} | P&L: ${changePct.toFixed(2)}% ($${pnl.toFixed(2)}) | Balance: $${this.balance.toFixed(2)} | Consecutive Losses: ${this.consecutiveLosses}`);
-                
-                // NEW: Update risk metrics
-                this.updateRiskMetrics();
-            }
-        }
-    }
-
-    // NEW: Update risk metrics
-    updateRiskMetrics() {
-        const totalTrades = this.wins + this.losses;
-        if (totalTrades === 0) return;
-        
-        this.riskMetrics.winRate = (this.wins / totalTrades) * 100;
-        
-        const winningTrades = this.trades.filter(t => t.pnl && t.pnl > 0);
-        const losingTrades = this.trades.filter(t => t.pnl && t.pnl < 0);
-        
-        this.riskMetrics.avgWin = winningTrades.length > 0 ? 
-            winningTrades.reduce((sum, t) => sum + t.pnl, 0) / winningTrades.length : 0;
-            
-        this.riskMetrics.avgLoss = losingTrades.length > 0 ? 
-            Math.abs(losingTrades.reduce((sum, t) => sum + t.pnl, 0) / losingTrades.length) : 0;
-            
-        this.riskMetrics.profitFactor = this.riskMetrics.avgLoss > 0 ? 
-            (this.riskMetrics.avgWin * this.wins) / (this.riskMetrics.avgLoss * this.losses) : 0;
-    }
-
-    // Get historical data from Binance REST API (unchanged)
+    // Get historical data from Binance REST API (for backtest)
     async getHistoricalData() {
         const symbol = this.config.symbol.toLowerCase();
         const interval = this.config.timeframe;
@@ -461,9 +113,156 @@ class EnhancedCryptoScalpingTester {
         }
     }
 
-    // Enhanced backtest with detailed reporting
+    // Get recent historical data for warmup (working backwards from current time)
+    async getRecentHistoricalData() {
+        const symbol = this.config.symbol.toLowerCase();
+        const interval = this.config.timeframe;
+        
+        // Calculate how much data we need for accurate indicators
+        const requiredDataPoints = Math.max(this.config.emaPeriod, this.config.rsiPeriod) * 2; // 2x for accuracy
+        const maxLimit = 1000; // Binance API limit
+        const limit = Math.min(requiredDataPoints, maxLimit);
+        
+        // Get current time and work backwards
+        const endTime = Date.now();
+        
+        const url = `https://api.binance.com/api/v3/klines?symbol=${symbol.toUpperCase()}&interval=${interval}&endTime=${endTime}&limit=${limit}`;
+        
+        try {
+            const response = await fetch(url);
+            const data = await response.json();
+            
+            if (!data || data.length === 0) {
+                throw new Error('No data returned from API');
+            }
+            
+            const historicalData = data.map(kline => ({
+                time: new Date(kline[0]),
+                open: parseFloat(kline[1]),
+                high: parseFloat(kline[2]),
+                low: parseFloat(kline[3]),
+                close: parseFloat(kline[4]),
+                volume: parseFloat(kline[5])
+            }));
+            
+            // Log the data range for verification
+            const firstCandle = historicalData[0];
+            const lastCandle = historicalData[historicalData.length - 1];
+            
+            console.log(`📅 Historical data range: ${firstCandle.time.toLocaleString()} to ${lastCandle.time.toLocaleString()}`);
+            console.log(`⏰ Data is ${Math.round((Date.now() - lastCandle.time.getTime()) / (1000 * 60))} minutes behind current time`);
+            
+            return historicalData;
+            
+        } catch (error) {
+            console.error('Error fetching recent historical data:', error);
+            return [];
+        }
+    }
+
+    // Get recent historical data for warmup
+    async getWarmupData() {
+        console.log('🔄 Loading recent historical data for warmup...');
+        console.log(`📊 Fetching data for EMA(${this.config.emaPeriod}) and RSI(${this.config.rsiPeriod}) calculations...`);
+        
+        // Use the new dynamic historical data function
+        const historicalData = await this.getRecentHistoricalData();
+        
+        if (historicalData.length === 0) {
+            console.error('❌ Failed to load warmup data');
+            return false;
+        }
+
+        // Populate price data with historical closes
+        this.priceData = historicalData.map(d => d.close);
+        
+        console.log(`✅ Loaded ${this.priceData.length} historical data points for warmup`);
+        console.log(`📊 Price range: ${Math.min(...this.priceData).toFixed(4)} - ${Math.max(...this.priceData).toFixed(4)}`);
+        console.log(`📊 Latest historical price: ${this.priceData[this.priceData.length - 1].toFixed(4)}`);
+        
+        // Calculate initial indicators to verify everything works
+        const emas = this.calculateEMA(this.priceData, this.config.emaPeriod);
+        const rsis = this.calculateRSI(this.priceData, this.config.rsiPeriod);
+        
+        const currentEMA = emas[emas.length - 1];
+        const currentRSI = rsis[rsis.length - 1];
+        
+        if (currentEMA && currentRSI) {
+            console.log(`📈 Initial EMA(${this.config.emaPeriod}): ${currentEMA.toFixed(4)}`);
+            console.log(`📊 Initial RSI(${this.config.rsiPeriod}): ${currentRSI.toFixed(2)}`);
+            
+            // Check if we have enough data points for accurate EMA
+            const emaDataPoints = this.priceData.length;
+            const recommendedPoints = this.config.emaPeriod * 2;
+            
+            if (emaDataPoints >= recommendedPoints) {
+                console.log(`✅ EMA accuracy: Excellent (${emaDataPoints}/${recommendedPoints} recommended points)`);
+            } else if (emaDataPoints >= this.config.emaPeriod) {
+                console.log(`⚠️ EMA accuracy: Good (${emaDataPoints}/${recommendedPoints} recommended points)`);
+            } else {
+                console.log(`❌ EMA accuracy: Poor (${emaDataPoints}/${recommendedPoints} recommended points)`);
+                console.log('⚠️ Consider using a shorter EMA period for more accurate results');
+            }
+            
+            this.isWarmupComplete = true;
+            return true;
+        } else {
+            console.error('❌ Failed to calculate initial indicators');
+            console.error(`🔍 Debug: Data points: ${this.priceData.length}, EMA period: ${this.config.emaPeriod}, RSI period: ${this.config.rsiPeriod}`);
+            return false;
+        }
+    }
+
+    // Process trade signal
+    processSignal(price, ema, rsi) {
+        if (isNaN(price) || isNaN(ema) || isNaN(rsi)) return;
+
+        // BUY signal
+        if (this.holdings === 0 && price > ema && rsi <= this.config.rsiEntry) {
+            const amount = this.balance / price;
+            this.holdings = amount;
+            this.entryPrice = price * (1 + this.config.slippagePct);
+            this.balance = 0;
+            
+            console.log(`🟢 BUY: ${amount.toFixed(6)} ${this.config.symbol} at $${price.toFixed(4)} | RSI: ${rsi.toFixed(2)} | EMA: ${ema.toFixed(4)}`);
+            return;
+        }
+
+        // SELL signals
+        if (this.holdings > 0) {
+            const changePct = ((price - this.entryPrice) / this.entryPrice) * 100;
+            let shouldSell = false;
+            let reason = '';
+
+            if (changePct >= this.config.tp2Pct || rsi >= this.config.rsiExit2) {
+                shouldSell = true;
+                reason = changePct >= this.config.tp2Pct ? 'TP2' : 'RSI Exit 2';
+            } else if (changePct >= this.config.tp1Pct || rsi >= this.config.rsiExit1) {
+                shouldSell = true;
+                reason = changePct >= this.config.tp1Pct ? 'TP1' : 'RSI Exit 1';
+            } else if (changePct <= this.config.slPct) {
+                shouldSell = true;
+                reason = 'Stop Loss';
+            }
+
+            if (shouldSell) {
+                this.balance = this.holdings * price * (1 - this.config.feePct);
+                this.holdings = 0;
+                
+                if (changePct > 0) {
+                    this.wins++;
+                } else {
+                    this.losses++;
+                }
+
+                console.log(`🔴 SELL: ${reason} at $${price.toFixed(4)} | P&L: ${changePct.toFixed(2)}% | Balance: $${this.balance.toFixed(2)}`);
+            }
+        }
+    }
+
+    // Run backtest
     async runBacktest() {
-        console.log('📊 Starting enhanced backtest with risk management...');
+        console.log('📊 Starting backtest...');
         const data = await this.getHistoricalData();
         
         if (data.length === 0) {
@@ -479,17 +278,8 @@ class EnhancedCryptoScalpingTester {
 
         // Process each candle
         for (let i = 0; i < data.length; i++) {
-            this.priceData.push(prices[i]);
-            
             if (emas[i] && rsis[i]) {
                 this.processSignal(prices[i], emas[i], rsis[i]);
-            }
-            
-            // NEW: Daily reset logic (simplified for backtest)
-            if (i > 0 && i % 480 === 0) { // Reset every ~24 hours (480 * 3min)
-                this.dailyStartBalance = this.balance + (this.holdings * prices[i]);
-                this.dailyTrades = 0;
-                this.tradingPaused = false; // Reset daily pause
             }
         }
 
@@ -497,60 +287,37 @@ class EnhancedCryptoScalpingTester {
         const finalPrice = prices[prices.length - 1];
         const finalBalance = this.balance + (this.holdings * finalPrice);
         const roi = ((finalBalance - this.config.initialBalance) / this.config.initialBalance) * 100;
-        const maxDrawdownPct = ((this.peakBalance - finalBalance) / this.peakBalance) * 100;
 
-        console.log('\n📋 ENHANCED BACKTEST RESULTS:');
-        console.log('=====================================');
+        console.log('\n📋 BACKTEST RESULTS:');
         console.log(`Initial Balance: $${this.config.initialBalance}`);
         console.log(`Final Balance: $${finalBalance.toFixed(2)}`);
-        console.log(`Peak Balance: $${this.peakBalance.toFixed(2)}`);
         console.log(`ROI: ${roi.toFixed(2)}%`);
-        console.log(`Max Drawdown: ${maxDrawdownPct.toFixed(2)}%`);
-        console.log(`Total Trades: ${this.totalTrades}`);
-        console.log(`Wins: ${this.wins} | Losses: ${this.losses}`);
-        console.log(`Win Rate: ${this.riskMetrics.winRate.toFixed(1)}%`);
-        console.log(`Profit Factor: ${this.riskMetrics.profitFactor.toFixed(2)}`);
-        console.log(`Average Win: $${this.riskMetrics.avgWin.toFixed(2)}`);
-        console.log(`Average Loss: $${this.riskMetrics.avgLoss.toFixed(2)}`);
-        console.log(`Risk-Reward Ratio: ${(this.riskMetrics.avgWin / this.riskMetrics.avgLoss).toFixed(2)}:1`);
-        
-        if (this.tradingPaused) {
-            console.log(`⚠️ Trading ended early: ${this.pauseReason}`);
-        }
-        
-        // NEW: Risk assessment
-        console.log('\n🛡️ RISK ASSESSMENT:');
-        if (roi > 0 && maxDrawdownPct < 10) {
-            console.log('✅ Low Risk: Positive returns with manageable drawdown');
-        } else if (roi > 0 && maxDrawdownPct < 20) {
-            console.log('⚠️ Medium Risk: Positive returns but significant drawdown');
-        } else {
-            console.log('❌ High Risk: Poor returns or excessive drawdown');
-        }
+        console.log(`Wins: ${this.wins}`);
+        console.log(`Losses: ${this.losses}`);
+        console.log(`Win Rate: ${this.wins + this.losses > 0 ? ((this.wins / (this.wins + this.losses)) * 100).toFixed(1) : 0}%`);
     }
 
-    // Start forward testing with WebSocket (enhanced)
-    startForwardTest() {
-        console.log('🚀 Starting enhanced forward test with risk management...');
+    // Start forward testing with WebSocket
+    async startForwardTest() {
+        console.log('🚀 Starting forward test with live data...');
+        
+        // First, load warmup data
+        const warmupSuccess = await this.getWarmupData();
+        if (!warmupSuccess) {
+            console.error('❌ Failed to load warmup data, cannot start forward testing');
+            return;
+        }
+        
+        console.log('✅ Warmup complete, connecting to live WebSocket...');
         
         const symbol = this.config.symbol.toLowerCase();
         const wsUrl = `wss://stream.binance.com:9443/ws/${symbol}@kline_${this.config.timeframe}`;
         
         this.ws = new WebSocket(wsUrl);
         
-        // NEW: Daily reset timer
-        setInterval(() => {
-            const now = new Date();
-            if (now.getUTCHours() === 0 && now.getUTCMinutes() === 0) {
-                this.dailyStartBalance = this.balance + (this.holdings * (this.priceData[this.priceData.length - 1] || 0));
-                this.dailyTrades = 0;
-                this.tradingPaused = false;
-                console.log('🌅 Daily reset completed');
-            }
-        }, 60000); // Check every minute
-        
         this.ws.on('open', () => {
             console.log(`📡 Connected to Binance WebSocket for ${this.config.symbol}`);
+            console.log('🎯 Ready to process live signals immediately!');
         });
 
         this.ws.on('message', (data) => {
@@ -569,24 +336,16 @@ class EnhancedCryptoScalpingTester {
                     this.priceData = this.priceData.slice(-maxLength);
                 }
 
-                // Calculate indicators
-                if (this.priceData.length >= this.config.emaPeriod) {
-                    const emas = this.calculateEMA(this.priceData, this.config.emaPeriod);
-                    const rsis = this.calculateRSI(this.priceData, this.config.rsiPeriod);
-                    
-                    const currentEMA = emas[emas.length - 1];
-                    const currentRSI = rsis[rsis.length - 1];
-                    
-                    if (currentEMA && currentRSI) {
-                        // NEW: Less frequent status updates
-                        if (Math.random() < 0.1) { // 10% chance to log
-                            const currentValue = this.balance + (this.holdings * price);
-                            const totalROI = ((currentValue - this.config.initialBalance) / this.config.initialBalance) * 100;
-                            console.log(`📊 ${new Date().toLocaleTimeString()} | $${price.toFixed(4)} | RSI: ${currentRSI.toFixed(1)} | ROI: ${totalROI.toFixed(2)}% | Trades: ${this.totalTrades} | Status: ${this.tradingPaused ? 'PAUSED' : 'ACTIVE'}`);
-                        }
-                        
-                        this.processSignal(price, currentEMA, currentRSI);
-                    }
+                // Calculate indicators (we can do this immediately since we have warmup data)
+                const emas = this.calculateEMA(this.priceData, this.config.emaPeriod);
+                const rsis = this.calculateRSI(this.priceData, this.config.rsiPeriod);
+                
+                const currentEMA = emas[emas.length - 1];
+                const currentRSI = rsis[rsis.length - 1];
+                
+                if (currentEMA && currentRSI) {
+                    console.log(`📊 ${new Date().toLocaleTimeString()} | Price: $${price.toFixed(4)} | RSI: ${currentRSI.toFixed(2)} | EMA: ${currentEMA.toFixed(4)}`);
+                    this.processSignal(price, currentEMA, currentRSI);
                 }
             }
         });
@@ -613,9 +372,8 @@ class EnhancedCryptoScalpingTester {
             console.log('\n📋 FORWARD TEST RESULTS:');
             console.log(`Final Balance: $${finalBalance.toFixed(2)}`);
             console.log(`ROI: ${roi.toFixed(2)}%`);
-            console.log(`Wins: ${this.wins} | Losses: ${this.losses}`);
-            console.log(`Win Rate: ${this.riskMetrics.winRate.toFixed(1)}%`);
-            console.log(`Max Consecutive Losses: ${Math.max(...this.trades.map(t => t.consecutiveLosses || 0))}`);
+            console.log(`Wins: ${this.wins}`);
+            console.log(`Losses: ${this.losses}`);
             
             process.exit(0);
         });
@@ -626,156 +384,31 @@ class EnhancedCryptoScalpingTester {
         if (this.config.backtest) {
             await this.runBacktest();
         } else {
-            this.startForwardTest();
+            await this.startForwardTest();
         }
     }
 }
 
-// OPTIMIZED Configuration with enhanced risk management
+// Configuration - modify these parameters
 const config = {
-    // Core parameters (same algorithm, optimized values)
-    symbol: 'AVAXUSDT',           // More liquid pair
-    timeframe: '3m',             // 3-minute optimal for scalping
-    startDate: '2025-09-01',
+    symbol: 'UNIUSDT',
+    timeframe: '3m',
+    startDate: '2025-09-18',
     endDate: '2025-09-19',
-    initialBalance: 1000,
-    
-    // OPTIMIZED: Technical indicators (same algorithm)
-    emaPeriod: 100,               // 21 optimal for 3m timeframe
-    rsiPeriod: 14,               // Standard RSI
-    rsiEntry: 40,                // Earlier entry at 40
-    
-    // OPTIMIZED: Risk-reward targets
-    tp1Pct: 1.5,                 // 1.5% first target
-    tp2Pct: 2.5,                 // 2.5% second target  
-    slPct: -0.7,                 // 0.7% stop loss (2.14:1 risk-reward)
-    
-    // OPTIMIZED: Exit levels
-    rsiExit1: 75,                // Exit at RSI 75
-    rsiExit2: 80,                // Exit at RSI 80
-    
-    // OPTIMIZED: Trading costs
-    feePct: 0.001,               // 0.1% realistic trading fee
-    slippagePct: 0.0003,         // 0.03% minimal slippage
-    
-    // ADVANCED: Risk Management Parameters
-    maxPositionSize: 0.85,       // Max 85% of balance per trade
-    maxDailyLoss: -4,            // Stop trading at 4% daily loss
-    maxDrawdown: -8,             // Stop trading at 8% total drawdown
-    maxConsecutiveLosses: 3,     // Stop after 3 consecutive losses
-    
-    // ADVANCED: Dynamic Position Sizing
-    basePositionSize: 0.3,       // Base position: 30% of balance
-    maxConfidenceMultiplier: 2.5, // Max position: 75% (30% × 2.5)
-    
-    // ADVANCED: Market Condition Filters
-    volatilityLookback: 20,      // Look back 20 periods for volatility
-    minVolatility: 0.5,          // Min 0.5% volatility to trade
-    maxVolatility: 3.0,          // Max 3% volatility to trade
-    minEMADistance: 0.2,         // Price must be 0.2% above EMA
-    rsiRangeFilter: { min: 20, max: 80 }, // Only trade RSI 20-80 range
-    
-    // ADVANCED: Time-based Risk Management
-    tradingHours: { start: 6, end: 22 }, // Trade 6 AM to 10 PM UTC (active hours)
-    avoidWeekends: false,        // Trade weekends (crypto is 24/7)
-    
-    // ADVANCED: Profit Protection
-    profitProtectionLevel: 50,   // Protect profits above 50% ROI
-    trailingStopDistance: 2,     // 2% trailing stop when in big profit
-    
-    backtest: true               // Set to false for live trading
-};
-
-// Alternative optimized configurations for different risk profiles:
-
-// CONSERVATIVE: Lower risk, steady gains
-const conservativeConfig = {
-    ...config,
-    symbol: 'BTCUSDT',
-    emaPeriod: 34,              // Slower EMA for fewer signals
-    rsiEntry: 35,               // More conservative entry
-    tp1Pct: 1.2,                // Lower profit targets
+    initialBalance: 890,
+    emaPeriod: 100,
+    rsiPeriod: 14,
+    rsiEntry: 45,
+    tp1Pct: 1.2,
     tp2Pct: 2.0,
-    slPct: -0.6,                // Tighter stop loss
-    basePositionSize: 0.2,      // Smaller positions (20%)
-    maxConfidenceMultiplier: 2.0, // Max 40% position size
-    maxDailyLoss: -3,           // Stricter daily loss limit
-    maxConsecutiveLosses: 2,    // Stop after 2 losses
-    maxVolatility: 2.0          // Avoid high volatility
+    slPct: -0.6,
+    feePct: 0.001,
+    slippagePct: 0.0005,
+    rsiExit1: 80,
+    rsiExit2: 85,
+    backtest: backtest  // Set to false for forward testing
 };
 
-// AGGRESSIVE: Higher risk, higher reward potential
-const aggressiveConfig = {
-    ...config,
-    symbol: 'ETHUSDT',          // More volatile pair
-    timeframe: '1m',            // Faster timeframe
-    emaPeriod: 13,              // Faster EMA
-    rsiEntry: 45,               // Less strict entry
-    tp1Pct: 2.0,                // Higher profit targets
-    tp2Pct: 3.5,
-    slPct: -1.0,                // Wider stop loss
-    basePositionSize: 0.4,      // Larger positions (40%)
-    maxConfidenceMultiplier: 2.0, // Max 80% position size
-    maxDailyLoss: -6,           // Allow higher daily loss
-    maxConsecutiveLosses: 4,    // Allow more consecutive losses
-    maxVolatility: 4.0,         // Trade higher volatility
-    minEMADistance: 0.1         // Less strict EMA distance
-};
-
-// BALANCED: Medium risk-reward profile
-const balancedConfig = {
-    ...config,
-    symbol: 'ADAUSDT',          // Moderately volatile
-    emaPeriod: 21,
-    rsiEntry: 38,
-    tp1Pct: 1.8,
-    tp2Pct: 2.8,
-    slPct: -0.8,
-    basePositionSize: 0.35,
-    maxConfidenceMultiplier: 2.2,
-    maxDailyLoss: -5,
-    maxConsecutiveLosses: 3
-};
-
-console.log('🛡️ ENHANCED CRYPTO SCALPING BOT WITH ADVANCED RISK MANAGEMENT');
-console.log('==============================================================');
-console.log('📊 OPTIMIZED PARAMETERS:');
-console.log(`   Symbol: ${config.symbol} | Timeframe: ${config.timeframe}`);
-console.log(`   EMA: ${config.emaPeriod} | RSI Entry: ${config.rsiEntry}`);
-console.log(`   Targets: TP1=${config.tp1Pct}%, TP2=${config.tp2Pct}% | Stop: ${config.slPct}%`);
-console.log(`   Risk-Reward: ${Math.abs(config.tp1Pct / config.slPct).toFixed(1)}:1`);
-console.log('');
-console.log('🛡️ RISK MANAGEMENT FEATURES:');
-console.log(`   ✅ Dynamic position sizing: ${config.basePositionSize * 100}% - ${config.basePositionSize * config.maxConfidenceMultiplier * 100}%`);
-console.log(`   ✅ Daily loss limit: ${config.maxDailyLoss}%`);
-console.log(`   ✅ Max drawdown protection: ${config.maxDrawdown}%`);
-console.log(`   ✅ Consecutive loss limit: ${config.maxConsecutiveLosses}`);
-console.log(`   ✅ Volatility filtering: ${config.minVolatility}% - ${config.maxVolatility}%`);
-console.log(`   ✅ Trading hours: ${config.tradingHours.start}:00 - ${config.tradingHours.end}:00 UTC`);
-console.log(`   ✅ Market condition filters enabled`);
-console.log(`   ✅ Profit protection above ${config.profitProtectionLevel}% ROI`);
-console.log('');
-console.log('🎯 EXPECTED IMPROVEMENTS:');
-console.log('   📈 Better risk-adjusted returns');
-console.log('   📊 Reduced maximum drawdown'); 
-console.log('   ⚡ Adaptive position sizing');
-console.log('   🛑 Automatic trading pauses');
-console.log('   📉 Volatility-based filtering');
-console.log('   ⏰ Time-based risk controls');
-console.log('==============================================================');
-console.log('');
-
-// Run the enhanced bot
-const enhancedBot = new EnhancedCryptoScalpingTester(config);
-enhancedBot.run().catch(console.error);
-
-// Export configurations for easy switching
-module.exports = {
-    EnhancedCryptoScalpingTester,
-    configs: {
-        optimized: config,
-        conservative: conservativeConfig,
-        aggressive: aggressiveConfig,
-        balanced: balancedConfig
-    }
-};
+// Run the tester
+const tester = new CryptoScalpingTester(config);
+tester.run().catch(console.error);

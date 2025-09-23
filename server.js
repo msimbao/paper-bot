@@ -284,8 +284,8 @@ class CryptoScalpingTester {
 const config = {
     symbol: 'AVAXUSDT',
     timeframe: '3m',
-    startDate: '2025-08-23',
-    endDate: '2025-08-24',
+    startDate: '2025-09-18',
+    endDate: '2025-09-19',
     initialBalance: 890,
     emaPeriod: 100,
     rsiPeriod: 14,
