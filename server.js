@@ -284,20 +284,20 @@ class CryptoScalpingTester {
 const config = {
     symbol: 'AVAXUSDT',
     timeframe: '3m',
-    startDate: '2025-09-18',
-    endDate: '2025-09-19',
-    initialBalance: 1000,
+    startDate: '2025-03-23',
+    endDate: '2025-03-24',
+    initialBalance: 890,
     emaPeriod: 100,
     rsiPeriod: 14,
     rsiEntry: 45,
     tp1Pct: 1.2,
     tp2Pct: 2.0,
-    slPct: -0.8,
+    slPct: -0.6,
     feePct: 0.001,
     slippagePct: 0.0005,
     rsiExit1: 80,
     rsiExit2: 85,
-    backtest: false  // Set to false for forward testing
+    backtest: true  // Set to false for forward testing
 };
 
 // Run the tester
