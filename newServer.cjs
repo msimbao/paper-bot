@@ -406,7 +406,7 @@ const config = {
     slippagePct: 0.0005,
     rsiExit1: 80,
     rsiExit2: 85,
-    backtest: backtest  // Set to false for forward testing
+    backtest: false  // Set to false for forward testing
 };
 
 // Run the tester
