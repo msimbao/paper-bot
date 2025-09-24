@@ -979,25 +979,25 @@ class CryptoScalpingTester {
 const config = {
     symbol: 'AVAXUSDT',
     timeframe: '3m',
-    startDate: '2025-09-18',
+    startDate: '2025-08-18',
     endDate: '2025-09-19',
     initialBalance: 890,
     emaPeriod: 100,
     rsiPeriod: 14,
     rsiEntry: 45,
-    tp1Pct: 1.2,
+    tp1Pct: 0.8,
     tp2Pct: 2.0,
     slPct: -1.2,
     feePct: 0.001,
     slippagePct: 0.0005,
     rsiExit1: 80,
     rsiExit2: 85,
-    backtest: false,  // Set to false for forward testing
+    backtest: true,  // Set to false for forward testing
     
     // Trailing Stop Loss Configuration
     enableTrailingStop: true,           // Enable/disable trailing stop
-    trailingStopTriggerPct: 1.2,       // Start trailing after 0.8% profit
-    trailingStopDistancePct: 1.2,       // Trail 0.4% below highest price
+    trailingStopTriggerPct: 0.8,       // Start trailing after 0.8% profit
+    trailingStopDistancePct: 0.4,       // Trail 0.4% below highest price
     trailingStopMode: 'replace_tp',           // 'both', 'replace_tp', 'additional'
     
     // Real Trading Configuration (DANGEROUS - USE WITH CAUTION!)
