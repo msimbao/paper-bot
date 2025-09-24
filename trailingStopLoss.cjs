@@ -992,7 +992,7 @@ const config = {
     slippagePct: 0.0005,
     rsiExit1: 80,
     rsiExit2: 85,
-    backtest: true,  // Set to false for forward testing
+    backtest: false,  // Set to false for forward testing
     
     // Trailing Stop Loss Configuration
     enableTrailingStop: true,           // Enable/disable trailing stop
