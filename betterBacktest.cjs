@@ -195,18 +195,34 @@ class CryptoScalpingTester {
         }
     }
 
-    // Get historical data from Binance REST API
-    async getHistoricalData(startDate = null, endDate = null, limit = 1000) {
-        const symbol = this.config.symbol.toLowerCase();
-        const interval = this.config.timeframe;
+    // Calculate timeframe in milliseconds
+    getTimeframeMs() {
+        const timeframes = {
+            '1m': 60 * 1000,
+            '3m': 3 * 60 * 1000,
+            '5m': 5 * 60 * 1000,
+            '15m': 15 * 60 * 1000,
+            '30m': 30 * 60 * 1000,
+            '1h': 60 * 60 * 1000,
+            '2h': 2 * 60 * 60 * 1000,
+            '4h': 4 * 60 * 60 * 1000,
+            '6h': 6 * 60 * 60 * 1000,
+            '8h': 8 * 60 * 60 * 1000,
+            '12h': 12 * 60 * 60 * 1000,
+            '1d': 24 * 60 * 60 * 1000,
+            '3d': 3 * 24 * 60 * 60 * 1000,
+            '1w': 7 * 24 * 60 * 60 * 1000,
+            '1M': 30 * 24 * 60 * 60 * 1000
+        };
+        return timeframes[this.config.timeframe] || 60 * 1000;
+    }
+
+    // Get single batch of historical data
+    async fetchKlinesBatch(symbol, interval, startTime, endTime, limit = 1000) {
+        let url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
         
-        let url = `https://api.binance.com/api/v3/klines?symbol=${symbol.toUpperCase()}&interval=${interval}&limit=${limit}`;
-        
-        if (startDate && endDate) {
-            const startTime = new Date(startDate).getTime();
-            const endTime = new Date(endDate).getTime();
-            url += `&startTime=${startTime}&endTime=${endTime}`;
-        }
+        if (startTime) url += `&startTime=${startTime}`;
+        if (endTime) url += `&endTime=${endTime}`;
         
         try {
             const response = await fetch(url);
@@ -215,19 +231,116 @@ class CryptoScalpingTester {
             }
             
             const data = await response.json();
-            
-            return data.map(kline => ({
-                time: new Date(kline[0]),
-                open: parseFloat(kline[1]),
-                high: parseFloat(kline[2]),
-                low: parseFloat(kline[3]),
-                close: parseFloat(kline[4]),
-                volume: parseFloat(kline[5])
-            }));
+            return data;
         } catch (error) {
-            this.log(`Error fetching historical data: ${error.message}`, 'ERROR');
-            return [];
+            this.log(`Error fetching klines batch: ${error.message}`, 'ERROR');
+            throw error;
         }
+    }
+
+    // Get complete historical data with pagination
+    async getHistoricalData(startDate = null, endDate = null, limit = 1000) {
+        const symbol = this.config.symbol.toUpperCase();
+        const interval = this.config.timeframe;
+        
+        // For recent data (no date range specified)
+        if (!startDate && !endDate) {
+            try {
+                const data = await this.fetchKlinesBatch(symbol, interval, null, null, limit);
+                return data.map(kline => ({
+                    time: new Date(kline[0]),
+                    open: parseFloat(kline[1]),
+                    high: parseFloat(kline[2]),
+                    low: parseFloat(kline[3]),
+                    close: parseFloat(kline[4]),
+                    volume: parseFloat(kline[5])
+                }));
+            } catch (error) {
+                this.log(`Error fetching recent historical data: ${error.message}`, 'ERROR');
+                return [];
+            }
+        }
+
+        // For date range queries - implement pagination
+        const startTime = new Date(startDate).getTime();
+        const endTime = new Date(endDate).getTime();
+        const timeframeMs = this.getTimeframeMs();
+        
+        this.log(`📅 Fetching historical data from ${startDate} to ${endDate}`, 'INFO');
+        this.log(`⏱️ Timeframe: ${interval} (${timeframeMs}ms per candle)`, 'INFO');
+        
+        const allKlines = [];
+        let currentStartTime = startTime;
+        let batchCount = 0;
+        const maxBatches = 50; // Safety limit to prevent infinite loops
+        
+        while (currentStartTime < endTime && batchCount < maxBatches) {
+            try {
+                // Calculate end time for this batch (1000 candles worth or actual end time, whichever is smaller)
+                const batchEndTime = Math.min(currentStartTime + (1000 * timeframeMs), endTime);
+                
+                this.log(`📦 Fetching batch ${batchCount + 1}: ${new Date(currentStartTime).toISOString()} to ${new Date(batchEndTime).toISOString()}`, 'INFO');
+                
+                const batchData = await this.fetchKlinesBatch(symbol, interval, currentStartTime, batchEndTime, 1000);
+                
+                if (batchData.length === 0) {
+                    this.log('📭 No more data available', 'INFO');
+                    break;
+                }
+                
+                allKlines.push(...batchData);
+                
+                // Move start time to after the last candle we received
+                const lastCandleTime = batchData[batchData.length - 1][0];
+                currentStartTime = lastCandleTime + timeframeMs;
+                
+                batchCount++;
+                
+                this.log(`📊 Batch ${batchCount} complete: ${batchData.length} candles (Total: ${allKlines.length})`, 'INFO');
+                
+                // Rate limiting - be nice to Binance API
+                if (batchCount < maxBatches) {
+                    await new Promise(resolve => setTimeout(resolve, 100)); // 100ms delay between requests
+                }
+                
+                // If we got less than 1000 candles, we've reached the end
+                if (batchData.length < 1000) {
+                    break;
+                }
+                
+            } catch (error) {
+                this.log(`❌ Error fetching batch ${batchCount + 1}: ${error.message}`, 'ERROR');
+                
+                // Wait longer before retrying
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                
+                // Try to continue with next batch
+                currentStartTime += 1000 * timeframeMs;
+                batchCount++;
+            }
+        }
+        
+        if (batchCount >= maxBatches) {
+            this.log(`⚠️ Reached maximum batch limit (${maxBatches}). Data may be incomplete.`, 'WARNING');
+        }
+        
+        this.log(`✅ Historical data collection complete: ${allKlines.length} total candles`, 'SUCCESS');
+        
+        // Remove duplicates (can happen at batch boundaries) and sort by time
+        const uniqueKlines = allKlines.filter((kline, index, array) => 
+            index === 0 || kline[0] !== array[index - 1][0]
+        ).sort((a, b) => a[0] - b[0]);
+        
+        this.log(`🔄 After deduplication: ${uniqueKlines.length} unique candles`, 'INFO');
+        
+        return uniqueKlines.map(kline => ({
+            time: new Date(kline[0]),
+            open: parseFloat(kline[1]),
+            high: parseFloat(kline[2]),
+            low: parseFloat(kline[3]),
+            close: parseFloat(kline[4]),
+            volume: parseFloat(kline[5])
+        }));
     }
 
     // Get recent historical data for initialization
@@ -496,36 +609,90 @@ class CryptoScalpingTester {
     // Run backtest
     async runBacktest() {
         this.log('📊 Starting backtest...', 'INFO');
-        const data = await this.getHistoricalData(this.config.startDate, this.config.endDate, 1000);
+        
+        // Validate date range
+        const startTime = new Date(this.config.startDate).getTime();
+        const endTime = new Date(this.config.endDate).getTime();
+        const daysDifference = (endTime - startTime) / (1000 * 60 * 60 * 24);
+        
+        this.log(`📅 Backtest period: ${this.config.startDate} to ${this.config.endDate} (${daysDifference.toFixed(1)} days)`, 'INFO');
+        
+        if (daysDifference > 365) {
+            this.log('⚠️ Large date range detected. This may take several minutes to download all data...', 'WARNING');
+        }
+        
+        const data = await this.getHistoricalData(this.config.startDate, this.config.endDate);
         
         if (data.length === 0) {
-            this.log('No historical data available', 'ERROR');
+            this.log('❌ No historical data available for the specified date range', 'ERROR');
             return;
         }
 
-        this.log(`📈 Loaded ${data.length} candles for ${this.config.symbol}`, 'INFO');
+        this.log(`📈 Processing ${data.length} candles for ${this.config.symbol}`, 'INFO');
+        this.log(`📊 Data range: ${data[0].time.toISOString()} to ${data[data.length - 1].time.toISOString()}`, 'INFO');
+        
+        // Validate we have enough data for indicators
+        const requiredCandles = Math.max(this.config.emaPeriod, this.config.rsiPeriod);
+        if (data.length < requiredCandles) {
+            this.log(`❌ Insufficient data: ${data.length} candles, need at least ${requiredCandles} for indicators`, 'ERROR');
+            return;
+        }
         
         const prices = data.map(d => d.close);
         const emas = this.calculateEMA(prices, this.config.emaPeriod);
         const rsis = this.calculateRSI(prices, this.config.rsiPeriod);
 
+        this.log('🔄 Processing trading signals...', 'INFO');
+        
+        let processedCandles = 0;
+        let lastProgressLog = 0;
+        
         for (let i = 0; i < data.length; i++) {
             if (emas[i] && rsis[i]) {
                 await this.processSignal(prices[i], emas[i], rsis[i]);
+                processedCandles++;
+                
+                // Progress logging for large datasets
+                if (data.length > 10000 && i - lastProgressLog > Math.floor(data.length / 20)) {
+                    const progress = ((i / data.length) * 100).toFixed(1);
+                    this.log(`📈 Backtest progress: ${progress}% (${i}/${data.length} candles)`, 'INFO');
+                    lastProgressLog = i;
+                }
             }
         }
 
+        // Calculate final results
         const finalPrice = prices[prices.length - 1];
         const finalBalance = this.balance + (this.holdings * finalPrice);
         const roi = ((finalBalance - this.config.initialBalance) / this.config.initialBalance) * 100;
+        const totalTrades = this.wins + this.losses;
+        const winRate = totalTrades > 0 ? ((this.wins / totalTrades) * 100) : 0;
+        const avgTradeReturn = totalTrades > 0 ? (roi / totalTrades) : 0;
+        
+        // Calculate some additional metrics
+        const tradingDays = daysDifference;
+        const tradesPerDay = totalTrades / tradingDays;
+        const annualizedROI = daysDifference > 0 ? (roi * (365 / daysDifference)) : 0;
 
         this.log('\n📋 BACKTEST RESULTS:', 'RESULT');
-        this.log(`Initial Balance: $${this.config.initialBalance}`, 'RESULT');
-        this.log(`Final Balance: $${finalBalance.toFixed(2)}`, 'RESULT');
-        this.log(`ROI: ${roi.toFixed(2)}%`, 'RESULT');
-        this.log(`Wins: ${this.wins}`, 'RESULT');
-        this.log(`Losses: ${this.losses}`, 'RESULT');
-        this.log(`Win Rate: ${this.wins + this.losses > 0 ? ((this.wins / (this.wins + this.losses)) * 100).toFixed(1) : 0}%`, 'RESULT');
+        this.log('=' * 50, 'RESULT');
+        this.log(`📊 Dataset: ${data.length} candles over ${daysDifference.toFixed(1)} days`, 'RESULT');
+        this.log(`🕒 Period: ${data[0].time.toDateString()} to ${data[data.length - 1].time.toDateString()}`, 'RESULT');
+        this.log(`💰 Initial Balance: ${this.config.initialBalance.toFixed(2)}`, 'RESULT');
+        this.log(`💰 Final Balance: ${finalBalance.toFixed(2)}`, 'RESULT');
+        this.log(`📈 Total ROI: ${roi.toFixed(2)}%`, 'RESULT');
+        this.log(`📅 Annualized ROI: ${annualizedROI.toFixed(2)}%`, 'RESULT');
+        this.log(`🎯 Total Trades: ${totalTrades}`, 'RESULT');
+        this.log(`✅ Wins: ${this.wins} (${winRate.toFixed(1)}%)`, 'RESULT');
+        this.log(`❌ Losses: ${this.losses} (${(100 - winRate).toFixed(1)}%)`, 'RESULT');
+        this.log(`📊 Avg Return/Trade: ${avgTradeReturn.toFixed(3)}%`, 'RESULT');
+        this.log(`🔄 Trades/Day: ${tradesPerDay.toFixed(2)}`, 'RESULT');
+        
+        if (this.holdings > 0) {
+            this.log(`⚠️ Still holding ${this.holdings.toFixed(6)} ${this.config.symbol} at end of backtest`, 'RESULT');
+        }
+        
+        this.log('=' * 50, 'RESULT');
     }
 
     // Start forward testing
@@ -593,19 +760,19 @@ class CryptoScalpingTester {
 const config = {
     symbol: 'AVAXUSDT',
     timeframe: '3m',
-    startDate: '2025-09-23',
-    endDate: '2025-09-24',
+    startDate: '2025-08-13',
+    endDate: '2025-08-14',
     initialBalance: 890,
     emaPeriod: 100,
     rsiPeriod: 14,
     rsiEntry: 45,
     tp1Pct: 1.2,
     tp2Pct: 2.0,
-    slPct: -0.8,
+    slPct: -0.6,
     feePct: 0.001,
     slippagePct: 0.0005,
-    rsiExit1: 70,
-    rsiExit2: 75,
+    rsiExit1: 80,
+    rsiExit2: 85,
     backtest: true,  // Set to false for forward testing
     
     // Real Trading Configuration (DANGEROUS - USE WITH CAUTION!)
@@ -616,7 +783,7 @@ const config = {
     // Connection Management
     maxReconnectAttempts: -1,  // -1 for infinite attempts
     reconnectDelay: 5000,  // Initial reconnection delay in ms
-    heartbeatInterval: 180000,  // Check connection every 3 minutes
+    heartbeatInterval: 30000,  // Check connection every 30 seconds
     dataTimeoutMs: 120000  // 2 minutes without data triggers reconnection
 };
 
