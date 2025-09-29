@@ -2,6 +2,9 @@ const WebSocket = require('ws');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { exec } = require('child_process');
+
+const termux = require('termux-notify');
 
 class CryptoScalpingTester {
     constructor(config = {}) {
@@ -25,18 +28,30 @@ class CryptoScalpingTester {
             
             // Trailing Stop Loss Configuration
             enableTrailingStop: config.enableTrailingStop || false,
-            trailingStopTriggerPct: config.trailingStopTriggerPct || 0.8, // Start trailing after 0.8% profit
-            trailingStopDistancePct: config.trailingStopDistancePct || 0.4, // Trail 0.4% below highest price
-            trailingStopMode: config.trailingStopMode || 'both', // 'both', 'replace_tp', 'additional'
+            trailingStopTriggerPct: config.trailingStopTriggerPct || 0.8,
+            trailingStopDistancePct: config.trailingStopDistancePct || 0.4,
+            trailingStopMode: config.trailingStopMode || 'both',
+            
             // Real trading options
             realTrading: config.realTrading || false,
             apiKey: config.apiKey || '',
             apiSecret: config.apiSecret || '',
+            
             // Connection settings
-            maxReconnectAttempts: config.maxReconnectAttempts || -1, // -1 for infinite
+            maxReconnectAttempts: config.maxReconnectAttempts || -1,
             reconnectDelay: config.reconnectDelay || 5000,
             heartbeatInterval: config.heartbeatInterval || 30000,
-            dataTimeoutMs: config.dataTimeoutMs || 120000 // 2 minutes without data = disconnect
+            dataTimeoutMs: config.dataTimeoutMs || 120000,
+            
+            // Notification settings
+            enableNotifications: config.enableNotifications !== false, // Default true
+            notifyBuyWarning: config.notifyBuyWarning !== false,
+            notifyBuySignal: config.notifyBuySignal !== false,
+            notifySellWarning: config.notifySellWarning !== false,
+            notifySellSignal: config.notifySellSignal !== false,
+            buyWarningRsiThreshold: config.buyWarningRsiThreshold || 50, // Warn when RSI drops below 50
+            sellWarningProfitThreshold: config.sellWarningProfitThreshold || 0.8, // Warn at 80% of TP1
+            notificationCooldown: config.notificationCooldown || 300000 // 5 min cooldown per alert type
         };
         
         this.balance = this.config.initialBalance;
@@ -62,15 +77,154 @@ class CryptoScalpingTester {
         this.dataTimeoutTimer = null;
         this.shouldReconnect = true;
         
+        // Notification tracking
+        this.lastNotifications = {
+            buyWarning: 0,
+            buySignal: 0,
+            sellWarning: 0,
+            sellSignal: 0,
+            trailingStop: 0
+        };
+        
         // Logging
         this.logFile = `trading_log_${new Date().toISOString().split('T')[0]}.txt`;
         this.initializeLogging();
+    }
+
+    // Send Termux notification
+    sendNotification(title, message, priority = 'default') {
+        if (!this.config.enableNotifications) return;
+        
+        // Escape special characters for shell
+        const safeTitle = title.replace(/['"\\]/g, '\\$&');
+        const safeMessage = message.replace(/['"\\]/g, '\\$&');
+        
+        const priorityFlag = priority === 'high' ? '--priority high' : '';
+        const command = `termux-notification ${priorityFlag} -t "${safeTitle}" -c "${safeMessage}"`;
+        
+        exec(command, (error, stdout, stderr) => {
+            if (error) {
+                this.log(`Notification error: ${error.message}`, 'WARNING');
+            }
+        });
+
+        termux(message);
+        
+        
+        this.log(`📱 NOTIFICATION: ${title} - ${message}`, 'NOTIFY');
+    }
+
+    // Check if enough time has passed since last notification of this type
+    canSendNotification(type) {
+        const now = Date.now();
+        const lastSent = this.lastNotifications[type] || 0;
+        return (now - lastSent) >= this.config.notificationCooldown;
+    }
+
+    // Update last notification time
+    updateNotificationTime(type) {
+        this.lastNotifications[type] = Date.now();
+    }
+
+    // Analyze market conditions and send appropriate notifications
+    analyzeAndNotify(price, ema, rsi) {
+        const now = Date.now();
+        
+        // BUY OPPORTUNITY NOTIFICATIONS
+        if (this.holdings === 0 && price > ema) {
+            // Warning: RSI approaching entry level
+            if (rsi <= this.config.buyWarningRsiThreshold && rsi > this.config.rsiEntry) {
+                if (this.config.notifyBuyWarning && this.canSendNotification('buyWarning')) {
+                    const rsiToEntry = rsi - this.config.rsiEntry;
+                    this.sendNotification(
+                        '⚠️ BUY OPPORTUNITY APPROACHING',
+                        `${this.config.symbol} RSI: ${rsi.toFixed(2)} (${rsiToEntry.toFixed(1)} from entry)\nPrice: $${price.toFixed(4)}\nPrepare to buy soon!`,
+                        'default'
+                    );
+                    this.updateNotificationTime('buyWarning');
+                }
+            }
+            
+            // Signal: BUY condition met
+            if (rsi <= this.config.rsiEntry) {
+                if (this.config.notifyBuySignal && this.canSendNotification('buySignal')) {
+                    this.sendNotification(
+                        '🟢 BUY SIGNAL TRIGGERED',
+                        `${this.config.symbol} BUY NOW!\nPrice: $${price.toFixed(4)}\nRSI: ${rsi.toFixed(2)}\nAmount: ${(this.balance / price).toFixed(6)}`,
+                        'high'
+                    );
+                    this.updateNotificationTime('buySignal');
+                }
+            }
+        }
+        
+        // SELL OPPORTUNITY NOTIFICATIONS
+        if (this.holdings > 0) {
+            const currentProfitPct = ((price - this.entryPrice) / this.entryPrice) * 100;
+            
+            // Warning: Approaching TP1 or RSI exit
+            const tp1Threshold = this.config.tp1Pct * (this.config.sellWarningProfitThreshold / 100);
+            const rsiToExit1 = this.config.rsiExit1 - rsi;
+            
+            if ((currentProfitPct >= tp1Threshold && currentProfitPct < this.config.tp1Pct) ||
+                (rsi >= (this.config.rsiExit1 - 5) && rsi < this.config.rsiExit1)) {
+                if (this.config.notifySellWarning && this.canSendNotification('sellWarning')) {
+                    this.sendNotification(
+                        '⚠️ SELL OPPORTUNITY APPROACHING',
+                        `${this.config.symbol} Profit: ${currentProfitPct.toFixed(2)}%\nRSI: ${rsi.toFixed(2)}\nTarget: ${this.config.tp1Pct}% or RSI ${this.config.rsiExit1}\nPrepare to sell soon!`,
+                        'default'
+                    );
+                    this.updateNotificationTime('sellWarning');
+                }
+            }
+            
+            // Signal: SELL condition met
+            const shouldSellTP = currentProfitPct >= this.config.tp1Pct;
+            const shouldSellRSI = rsi >= this.config.rsiExit1;
+            const shouldSellSL = currentProfitPct <= this.config.slPct;
+            const shouldSellTrailing = this.isTrailingStopTriggered(price);
+            
+            if (shouldSellTP || shouldSellRSI || shouldSellSL || shouldSellTrailing) {
+                if (this.config.notifySellSignal && this.canSendNotification('sellSignal')) {
+                    let reason = '';
+                    if (shouldSellTrailing) reason = 'TRAILING STOP';
+                    else if (shouldSellTP) reason = 'TAKE PROFIT';
+                    else if (shouldSellRSI) reason = 'RSI EXIT';
+                    else if (shouldSellSL) reason = 'STOP LOSS';
+                    
+                    this.sendNotification(
+                        `🔴 SELL SIGNAL - ${reason}`,
+                        `${this.config.symbol} SELL NOW!\nPrice: $${price.toFixed(4)}\nProfit: ${currentProfitPct.toFixed(2)}%\nRSI: ${rsi.toFixed(2)}\nAmount: ${this.holdings.toFixed(6)}`,
+                        'high'
+                    );
+                    this.updateNotificationTime('sellSignal');
+                }
+            }
+            
+            // Trailing stop activation notification
+            if (this.config.enableTrailingStop && !this.trailingStopActive && 
+                currentProfitPct >= this.config.trailingStopTriggerPct) {
+                if (this.canSendNotification('trailingStop')) {
+                    this.sendNotification(
+                        '🎯 TRAILING STOP ACTIVATED',
+                        `${this.config.symbol} Profit: ${currentProfitPct.toFixed(2)}%\nTrailing stop now active\nLocking in gains!`,
+                        'default'
+                    );
+                    this.updateNotificationTime('trailingStop');
+                }
+            }
+        }
     }
 
     // Initialize logging system
     initializeLogging() {
         this.log('🚀 System initialized', 'INFO');
         this.log(`Configuration: ${JSON.stringify(this.config, null, 2)}`, 'CONFIG');
+        
+        if (this.config.enableNotifications) {
+            this.log('📱 Termux notifications ENABLED', 'INFO');
+            this.sendNotification('Bot Started', `${this.config.symbol} monitoring active`);
+        }
     }
 
     // Enhanced logging with timestamps and levels
@@ -80,7 +234,6 @@ class CryptoScalpingTester {
         
         console.log(logEntry);
         
-        // Write to log file
         try {
             fs.appendFileSync(this.logFile, logEntry + '\n');
         } catch (error) {
@@ -146,7 +299,6 @@ class CryptoScalpingTester {
 
         const currentProfitPct = ((currentPrice - this.entryPrice) / this.entryPrice) * 100;
         
-        // Check if we should activate trailing stop
         if (!this.trailingStopActive && currentProfitPct >= this.config.trailingStopTriggerPct) {
             this.trailingStopActive = true;
             this.highestPriceSinceEntry = currentPrice;
@@ -155,7 +307,6 @@ class CryptoScalpingTester {
             this.log(`🎯 Trailing stop ACTIVATED at ${currentPrice.toFixed(4)} | Profit: ${currentProfitPct.toFixed(2)}% | Trail Stop: ${this.trailingStopPrice.toFixed(4)}`, 'INFO');
         }
         
-        // Update trailing stop if active and price is rising
         if (this.trailingStopActive && currentPrice > this.highestPriceSinceEntry) {
             this.highestPriceSinceEntry = currentPrice;
             const newTrailingStopPrice = currentPrice * (1 - this.config.trailingStopDistancePct / 100);
@@ -178,6 +329,7 @@ class CryptoScalpingTester {
         this.highestPriceSinceEntry = 0;
         this.trailingStopPrice = 0;
     }
+
     createSignature(queryString) {
         return crypto.createHmac('sha256', this.config.apiSecret)
                     .update(queryString)
@@ -286,236 +438,127 @@ class CryptoScalpingTester {
         }
     }
 
-    // Get complete historical data with pagination
-    // async getHistoricalData(startDate = null, endDate = null, limit = 1000) {
-    //     const symbol = this.config.symbol.toUpperCase();
-    //     const interval = this.config.timeframe;
-        
-    //     // For recent data (no date range specified)
-    //     if (!startDate && !endDate) {
-    //         try {
-    //             const data = await this.fetchKlinesBatch(symbol, interval, null, null, limit);
-    //             return data.map(kline => ({
-    //                 time: new Date(kline[0]),
-    //                 open: parseFloat(kline[1]),
-    //                 high: parseFloat(kline[2]),
-    //                 low: parseFloat(kline[3]),
-    //                 close: parseFloat(kline[4]),
-    //                 volume: parseFloat(kline[5])
-    //             }));
-    //         } catch (error) {
-    //             this.log(`Error fetching recent historical data: ${error.message}`, 'ERROR');
-    //             return [];
-    //         }
-    //     }
-
-    //     // For date range queries - implement pagination
-    //     const startTime = new Date(startDate).getTime();
-    //     const endTime = new Date(endDate).getTime();
-    //     const timeframeMs = this.getTimeframeMs();
-        
-    //     this.log(`📅 Fetching historical data from ${startDate} to ${endDate}`, 'INFO');
-    //     this.log(`⏱️ Timeframe: ${interval} (${timeframeMs}ms per candle)`, 'INFO');
-        
-    //     const allKlines = [];
-    //     let currentStartTime = startTime;
-    //     let batchCount = 0;
-    //     const maxBatches = 50; // Safety limit to prevent infinite loops
-        
-    //     while (currentStartTime < endTime && batchCount < maxBatches) {
-    //         try {
-    //             // Calculate end time for this batch (1000 candles worth or actual end time, whichever is smaller)
-    //             const batchEndTime = Math.min(currentStartTime + (1000 * timeframeMs), endTime);
-                
-    //             this.log(`📦 Fetching batch ${batchCount + 1}: ${new Date(currentStartTime).toISOString()} to ${new Date(batchEndTime).toISOString()}`, 'INFO');
-                
-    //             const batchData = await this.fetchKlinesBatch(symbol, interval, currentStartTime, batchEndTime, 1000);
-                
-    //             if (batchData.length === 0) {
-    //                 this.log('📭 No more data available', 'INFO');
-    //                 break;
-    //             }
-                
-    //             allKlines.push(...batchData);
-                
-    //             // Move start time to after the last candle we received
-    //             const lastCandleTime = batchData[batchData.length - 1][0];
-    //             currentStartTime = lastCandleTime + timeframeMs;
-                
-    //             batchCount++;
-                
-    //             this.log(`📊 Batch ${batchCount} complete: ${batchData.length} candles (Total: ${allKlines.length})`, 'INFO');
-                
-    //             // Rate limiting - be nice to Binance API
-    //             if (batchCount < maxBatches) {
-    //                 await new Promise(resolve => setTimeout(resolve, 100)); // 100ms delay between requests
-    //             }
-                
-    //             // If we got less than 1000 candles, we've reached the end
-    //             if (batchData.length < 1000) {
-    //                 break;
-    //             }
-                
-    //         } catch (error) {
-    //             this.log(`❌ Error fetching batch ${batchCount + 1}: ${error.message}`, 'ERROR');
-                
-    //             // Wait longer before retrying
-    //             await new Promise(resolve => setTimeout(resolve, 1000));
-                
-    //             // Try to continue with next batch
-    //             currentStartTime += 1000 * timeframeMs;
-    //             batchCount++;
-    //         }
-    //     }
-        
-    //     if (batchCount >= maxBatches) {
-    //         this.log(`⚠️ Reached maximum batch limit (${maxBatches}). Data may be incomplete.`, 'WARNING');
-    //     }
-        
-    //     this.log(`✅ Historical data collection complete: ${allKlines.length} total candles`, 'SUCCESS');
-        
-    //     // Remove duplicates (can happen at batch boundaries) and sort by time
-    //     const uniqueKlines = allKlines.filter((kline, index, array) => 
-    //         index === 0 || kline[0] !== array[index - 1][0]
-    //     ).sort((a, b) => a[0] - b[0]);
-        
-    //     this.log(`🔄 After deduplication: ${uniqueKlines.length} unique candles`, 'INFO');
-        
-    //     return uniqueKlines.map(kline => ({
-    //         time: new Date(kline[0]),
-    //         open: parseFloat(kline[1]),
-    //         high: parseFloat(kline[2]),
-    //         low: parseFloat(kline[3]),
-    //         close: parseFloat(kline[4]),
-    //         volume: parseFloat(kline[5])
-    //     }));
-    // }
-
     async getHistoricalData(startDate = null, endDate = null, limit = 1000) {
-    const symbol = this.config.symbol.toUpperCase();
-    const interval = this.config.timeframe;
-    const cacheDir = path.join(__dirname, 'data_cache');
-    if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir);
+        const symbol = this.config.symbol.toUpperCase();
+        const interval = this.config.timeframe;
+        const cacheDir = path.join(__dirname, 'data_cache');
+        if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir);
 
-    // If both dates are provided, try cache
-    let cacheFile = null;
-    if (startDate && endDate) {
-        const fileSafe = `${symbol}_${interval}_${startDate}_${endDate}.json`
-            .replace(/[^a-zA-Z0-9_.-]/g, "_");
-        cacheFile = path.join(cacheDir, fileSafe);
+        let cacheFile = null;
+        if (startDate && endDate) {
+            const fileSafe = `${symbol}_${interval}_${startDate}_${endDate}.json`
+                .replace(/[^a-zA-Z0-9_.-]/g, "_");
+            cacheFile = path.join(cacheDir, fileSafe);
 
-        if (fs.existsSync(cacheFile)) {
-            this.log(`📂 Loaded candles from cache: ${cacheFile}`, 'INFO');
-            const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
-            return cached.map(d => ({
-                time: new Date(d.time),
-                open: d.open,
-                high: d.high,
-                low: d.low,
-                close: d.close,
-                volume: d.volume
-            }));
-        }
-    }
-
-    // === Your original batching logic starts here ===
-    if (!startDate && !endDate) {
-        try {
-            const data = await this.fetchKlinesBatch(symbol, interval, null, null, limit);
-            return data.map(kline => ({
-                time: new Date(kline[0]),
-                open: parseFloat(kline[1]),
-                high: parseFloat(kline[2]),
-                low: parseFloat(kline[3]),
-                close: parseFloat(kline[4]),
-                volume: parseFloat(kline[5])
-            }));
-        } catch (error) {
-            this.log(`Error fetching recent historical data: ${error.message}`, 'ERROR');
-            return [];
-        }
-    }
-
-    const startTime = new Date(startDate).getTime();
-    const endTime = new Date(endDate).getTime();
-    const timeframeMs = this.getTimeframeMs();
-
-    this.log(`📅 Fetching historical data from ${startDate} to ${endDate}`, 'INFO');
-    this.log(`⏱️ Timeframe: ${interval} (${timeframeMs}ms per candle)`, 'INFO');
-
-    const allKlines = [];
-    let currentStartTime = startTime;
-    let batchCount = 0;
-    const maxBatches = 50;
-
-    while (currentStartTime < endTime && batchCount < maxBatches) {
-        try {
-            const batchEndTime = Math.min(currentStartTime + (1000 * timeframeMs), endTime);
-
-            this.log(`📦 Fetching batch ${batchCount + 1}: ${new Date(currentStartTime).toISOString()} to ${new Date(batchEndTime).toISOString()}`, 'INFO');
-
-            const batchData = await this.fetchKlinesBatch(symbol, interval, currentStartTime, batchEndTime, 1000);
-
-            if (batchData.length === 0) {
-                this.log('📭 No more data available', 'INFO');
-                break;
+            if (fs.existsSync(cacheFile)) {
+                this.log(`📂 Loaded candles from cache: ${cacheFile}`, 'INFO');
+                const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+                return cached.map(d => ({
+                    time: new Date(d.time),
+                    open: d.open,
+                    high: d.high,
+                    low: d.low,
+                    close: d.close,
+                    volume: d.volume
+                }));
             }
-
-            allKlines.push(...batchData);
-
-            const lastCandleTime = batchData[batchData.length - 1][0];
-            currentStartTime = lastCandleTime + timeframeMs;
-
-            batchCount++;
-
-            this.log(`📊 Batch ${batchCount} complete: ${batchData.length} candles (Total: ${allKlines.length})`, 'INFO');
-
-            if (batchCount < maxBatches) {
-                await new Promise(resolve => setTimeout(resolve, 100)); 
-            }
-
-            if (batchData.length < 1000) {
-                break;
-            }
-
-        } catch (error) {
-            this.log(`❌ Error fetching batch ${batchCount + 1}: ${error.message}`, 'ERROR');
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            currentStartTime += 1000 * timeframeMs;
-            batchCount++;
         }
+
+        if (!startDate && !endDate) {
+            try {
+                const data = await this.fetchKlinesBatch(symbol, interval, null, null, limit);
+                return data.map(kline => ({
+                    time: new Date(kline[0]),
+                    open: parseFloat(kline[1]),
+                    high: parseFloat(kline[2]),
+                    low: parseFloat(kline[3]),
+                    close: parseFloat(kline[4]),
+                    volume: parseFloat(kline[5])
+                }));
+            } catch (error) {
+                this.log(`Error fetching recent historical data: ${error.message}`, 'ERROR');
+                return [];
+            }
+        }
+
+        const startTime = new Date(startDate).getTime();
+        const endTime = new Date(endDate).getTime();
+        const timeframeMs = this.getTimeframeMs();
+
+        this.log(`📅 Fetching historical data from ${startDate} to ${endDate}`, 'INFO');
+        this.log(`⏱️ Timeframe: ${interval} (${timeframeMs}ms per candle)`, 'INFO');
+
+        const allKlines = [];
+        let currentStartTime = startTime;
+        let batchCount = 0;
+        const maxBatches = 50;
+
+        while (currentStartTime < endTime && batchCount < maxBatches) {
+            try {
+                const batchEndTime = Math.min(currentStartTime + (1000 * timeframeMs), endTime);
+
+                this.log(`📦 Fetching batch ${batchCount + 1}: ${new Date(currentStartTime).toISOString()} to ${new Date(batchEndTime).toISOString()}`, 'INFO');
+
+                const batchData = await this.fetchKlinesBatch(symbol, interval, currentStartTime, batchEndTime, 1000);
+
+                if (batchData.length === 0) {
+                    this.log('📭 No more data available', 'INFO');
+                    break;
+                }
+
+                allKlines.push(...batchData);
+
+                const lastCandleTime = batchData[batchData.length - 1][0];
+                currentStartTime = lastCandleTime + timeframeMs;
+
+                batchCount++;
+
+                this.log(`📊 Batch ${batchCount} complete: ${batchData.length} candles (Total: ${allKlines.length})`, 'INFO');
+
+                if (batchCount < maxBatches) {
+                    await new Promise(resolve => setTimeout(resolve, 100)); 
+                }
+
+                if (batchData.length < 1000) {
+                    break;
+                }
+
+            } catch (error) {
+                this.log(`❌ Error fetching batch ${batchCount + 1}: ${error.message}`, 'ERROR');
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                currentStartTime += 1000 * timeframeMs;
+                batchCount++;
+            }
+        }
+
+        if (batchCount >= maxBatches) {
+            this.log(`⚠️ Reached maximum batch limit (${maxBatches}). Data may be incomplete.`, 'WARNING');
+        }
+
+        this.log(`✅ Historical data collection complete: ${allKlines.length} total candles`, 'SUCCESS');
+
+        const uniqueKlines = allKlines.filter((kline, index, array) => 
+            index === 0 || kline[0] !== array[index - 1][0]
+        ).sort((a, b) => a[0] - b[0]);
+
+        this.log(`🔄 After deduplication: ${uniqueKlines.length} unique candles`, 'INFO');
+
+        const finalData = uniqueKlines.map(kline => ({
+            time: new Date(kline[0]),
+            open: parseFloat(kline[1]),
+            high: parseFloat(kline[2]),
+            low: parseFloat(kline[3]),
+            close: parseFloat(kline[4]),
+            volume: parseFloat(kline[5])
+        }));
+
+        if (cacheFile) {
+            fs.writeFileSync(cacheFile, JSON.stringify(finalData, null, 2));
+            this.log(`💾 Saved candles to cache: ${cacheFile}`, 'SUCCESS');
+        }
+
+        return finalData;
     }
-
-    if (batchCount >= maxBatches) {
-        this.log(`⚠️ Reached maximum batch limit (${maxBatches}). Data may be incomplete.`, 'WARNING');
-    }
-
-    this.log(`✅ Historical data collection complete: ${allKlines.length} total candles`, 'SUCCESS');
-
-    const uniqueKlines = allKlines.filter((kline, index, array) => 
-        index === 0 || kline[0] !== array[index - 1][0]
-    ).sort((a, b) => a[0] - b[0]);
-
-    this.log(`🔄 After deduplication: ${uniqueKlines.length} unique candles`, 'INFO');
-
-    const finalData = uniqueKlines.map(kline => ({
-        time: new Date(kline[0]),
-        open: parseFloat(kline[1]),
-        high: parseFloat(kline[2]),
-        low: parseFloat(kline[3]),
-        close: parseFloat(kline[4]),
-        volume: parseFloat(kline[5])
-    }));
-
-    // Save to cache if requested
-    if (cacheFile) {
-        fs.writeFileSync(cacheFile, JSON.stringify(finalData, null, 2));
-        this.log(`💾 Saved candles to cache: ${cacheFile}`, 'SUCCESS');
-    }
-
-    return finalData;
-}
-
 
     // Get recent historical data for initialization
     async getRecentHistoricalData() {
@@ -556,6 +599,9 @@ class CryptoScalpingTester {
     async processSignal(price, ema, rsi) {
         if (isNaN(price) || isNaN(ema) || isNaN(rsi)) return;
 
+        // Analyze market and send notifications FIRST
+        this.analyzeAndNotify(price, ema, rsi);
+
         // BUY signal
         if (this.holdings === 0 && price > ema && rsi <= this.config.rsiEntry) {
             const amount = this.balance / price;
@@ -567,7 +613,7 @@ class CryptoScalpingTester {
                     this.entryPrice = price * (1 + this.config.slippagePct);
                     this.entryTime = new Date();
                     this.balance = 0;
-                    this.resetTrailingStop(); // Reset for new trade
+                    this.resetTrailingStop();
                 } catch (error) {
                     this.log(`❌ Failed to execute BUY order: ${error.message}`, 'ERROR');
                     return;
@@ -577,7 +623,7 @@ class CryptoScalpingTester {
                 this.entryPrice = price * (1 + this.config.slippagePct);
                 this.entryTime = new Date();
                 this.balance = 0;
-                this.resetTrailingStop(); // Reset for new trade
+                this.resetTrailingStop();
             }
             
             this.log(`🟢 BUY: ${amount.toFixed(6)} ${this.config.symbol} at ${price.toFixed(4)} | RSI: ${rsi.toFixed(2)} | EMA: ${ema.toFixed(4)} | Mode: ${this.config.realTrading ? 'REAL' : 'PAPER'}`, 'TRADE');
@@ -592,14 +638,11 @@ class CryptoScalpingTester {
             let shouldSell = false;
             let reason = '';
 
-            // Check trailing stop first (highest priority when active)
             if (this.isTrailingStopTriggered(price)) {
                 shouldSell = true;
                 reason = 'Trailing Stop';
             }
-            // Traditional exit conditions based on mode
             else if (this.config.trailingStopMode === 'replace_tp') {
-                // Trailing stop replaces TP levels - only use RSI exits and SL
                 if (rsi >= this.config.rsiExit2) {
                     shouldSell = true;
                     reason = 'RSI Exit 2';
@@ -612,7 +655,6 @@ class CryptoScalpingTester {
                 }
             }
             else if (this.config.trailingStopMode === 'additional') {
-                // Trailing stop works alongside all other exits
                 if (changePct >= this.config.tp2Pct || rsi >= this.config.rsiExit2) {
                     shouldSell = true;
                     reason = changePct >= this.config.tp2Pct ? 'TP2' : 'RSI Exit 2';
@@ -624,12 +666,11 @@ class CryptoScalpingTester {
                     reason = 'Stop Loss';
                 }
             }
-            else { // 'both' mode (default) - Balanced approach
+            else {
                 if (changePct >= this.config.tp2Pct || rsi >= this.config.rsiExit2) {
                     shouldSell = true;
                     reason = changePct >= this.config.tp2Pct ? 'TP2' : 'RSI Exit 2';
                 } else if (!this.trailingStopActive && (changePct >= this.config.tp1Pct || rsi >= this.config.rsiExit1)) {
-                    // Only use TP1/RSI1 if trailing stop hasn't activated yet
                     shouldSell = true;
                     reason = changePct >= this.config.tp1Pct ? 'TP1' : 'RSI Exit 1';
                 } else if (changePct <= this.config.slPct) {
@@ -672,7 +713,6 @@ class CryptoScalpingTester {
         }
     }
 
-    // Setup heartbeat monitoring
     setupHeartbeat() {
         if (this.heartbeatTimer) {
             clearInterval(this.heartbeatTimer);
@@ -689,7 +729,6 @@ class CryptoScalpingTester {
         }, this.config.heartbeatInterval);
     }
 
-    // Connect to WebSocket
     async connectWebSocket() {
         if (this.isConnecting) return;
         
@@ -718,7 +757,7 @@ class CryptoScalpingTester {
                     const message = JSON.parse(data);
                     const kline = message.k;
                     
-                    if (kline.x) { // Only process completed candles
+                    if (kline.x) {
                         this.processKlineData(kline);
                     }
                 } catch (error) {
@@ -751,7 +790,6 @@ class CryptoScalpingTester {
         }
     }
 
-    // Process incoming kline data
     async processKlineData(kline) {
         const price = parseFloat(kline.c);
         
@@ -777,7 +815,6 @@ class CryptoScalpingTester {
         }
     }
 
-    // Schedule reconnection attempt
     scheduleReconnect() {
         if (!this.shouldReconnect) return;
         
@@ -789,22 +826,19 @@ class CryptoScalpingTester {
             return;
         }
         
-        const delay = Math.min(this.config.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1), 60000); // Exponential backoff, max 1 minute
+        const delay = Math.min(this.config.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1), 60000);
         
         this.log(`🔄 Scheduling reconnection attempt ${this.reconnectAttempts} in ${delay}ms`, 'INFO');
         
         setTimeout(async () => {
             if (this.shouldReconnect && !this.isConnected) {
                 this.log(`🔄 Reconnection attempt ${this.reconnectAttempts}`, 'INFO');
-                
-                // Refresh historical data on reconnect for accuracy
                 await this.getRecentHistoricalData();
                 await this.connectWebSocket();
             }
         }, delay);
     }
 
-    // Force reconnection
     async reconnectWebSocket() {
         this.log('🔄 Forcing WebSocket reconnection...', 'INFO');
         
@@ -825,11 +859,9 @@ class CryptoScalpingTester {
         await this.connectWebSocket();
     }
 
-    // Run backtest
     async runBacktest() {
         this.log('📊 Starting backtest...', 'INFO');
         
-        // Validate date range
         const startTime = new Date(this.config.startDate).getTime();
         const endTime = new Date(this.config.endDate).getTime();
         const daysDifference = (endTime - startTime) / (1000 * 60 * 60 * 24);
@@ -850,7 +882,6 @@ class CryptoScalpingTester {
         this.log(`📈 Processing ${data.length} candles for ${this.config.symbol}`, 'INFO');
         this.log(`📊 Data range: ${data[0].time.toISOString()} to ${data[data.length - 1].time.toISOString()}`, 'INFO');
         
-        // Validate we have enough data for indicators
         const requiredCandles = Math.max(this.config.emaPeriod, this.config.rsiPeriod);
         if (data.length < requiredCandles) {
             this.log(`❌ Insufficient data: ${data.length} candles, need at least ${requiredCandles} for indicators`, 'ERROR');
@@ -871,7 +902,6 @@ class CryptoScalpingTester {
                 await this.processSignal(prices[i], emas[i], rsis[i]);
                 processedCandles++;
                 
-                // Progress logging for large datasets
                 if (data.length > 10000 && i - lastProgressLog > Math.floor(data.length / 20)) {
                     const progress = ((i / data.length) * 100).toFixed(1);
                     this.log(`📈 Backtest progress: ${progress}% (${i}/${data.length} candles)`, 'INFO');
@@ -880,7 +910,6 @@ class CryptoScalpingTester {
             }
         }
 
-        // Calculate final results
         const finalPrice = prices[prices.length - 1];
         const finalBalance = this.balance + (this.holdings * finalPrice);
         const roi = ((finalBalance - this.config.initialBalance) / this.config.initialBalance) * 100;
@@ -888,13 +917,12 @@ class CryptoScalpingTester {
         const winRate = totalTrades > 0 ? ((this.wins / totalTrades) * 100) : 0;
         const avgTradeReturn = totalTrades > 0 ? (roi / totalTrades) : 0;
         
-        // Calculate some additional metrics
         const tradingDays = daysDifference;
         const tradesPerDay = totalTrades / tradingDays;
         const annualizedROI = daysDifference > 0 ? (roi * (365 / daysDifference)) : 0;
 
         this.log('\n📋 BACKTEST RESULTS:', 'RESULT');
-        this.log('=' * 50, 'RESULT');
+        this.log('='.repeat(50), 'RESULT');
         this.log(`📊 Dataset: ${data.length} candles over ${daysDifference.toFixed(1)} days`, 'RESULT');
         this.log(`🕒 Period: ${data[0].time.toDateString()} to ${data[data.length - 1].time.toDateString()}`, 'RESULT');
         this.log(`💰 Initial Balance: ${this.config.initialBalance.toFixed(2)}`, 'RESULT');
@@ -911,10 +939,9 @@ class CryptoScalpingTester {
             this.log(`⚠️ Still holding ${this.holdings.toFixed(6)} ${this.config.symbol} at end of backtest`, 'RESULT');
         }
         
-        this.log('=' * 50, 'RESULT');
+        this.log('='.repeat(50), 'RESULT');
     }
 
-    // Start forward testing
     async startForwardTest() {
         this.log('🚀 Starting forward test with live data...', 'INFO');
         
@@ -924,7 +951,7 @@ class CryptoScalpingTester {
             try {
                 const accountBalance = await this.getAccountBalance();
                 this.balance = accountBalance;
-                this.log(`💰 Account Balance: $${accountBalance.toFixed(2)}`, 'INFO');
+                this.log(`💰 Account Balance: ${accountBalance.toFixed(2)}`, 'INFO');
             } catch (error) {
                 this.log(`❌ Failed to connect to Binance account: ${error.message}`, 'ERROR');
                 return;
@@ -939,7 +966,6 @@ class CryptoScalpingTester {
         
         await this.connectWebSocket();
         
-        // Handle graceful shutdown
         process.on('SIGINT', () => {
             this.log('\n🛑 Shutdown signal received...', 'INFO');
             this.shouldReconnect = false;
@@ -956,16 +982,17 @@ class CryptoScalpingTester {
             const roi = ((finalBalance - this.config.initialBalance) / this.config.initialBalance) * 100;
             
             this.log('\n📋 FORWARD TEST RESULTS:', 'RESULT');
-            this.log(`Final Balance: $${finalBalance.toFixed(2)}`, 'RESULT');
+            this.log(`Final Balance: ${finalBalance.toFixed(2)}`, 'RESULT');
             this.log(`ROI: ${roi.toFixed(2)}%`, 'RESULT');
             this.log(`Wins: ${this.wins}`, 'RESULT');
             this.log(`Losses: ${this.losses}`, 'RESULT');
+            
+            this.sendNotification('Bot Stopped', `Final Balance: ${finalBalance.toFixed(2)} | ROI: ${roi.toFixed(2)}%`);
             
             process.exit(0);
         });
     }
 
-    // Main run method
     async run() {
         if (this.config.backtest) {
             await this.runBacktest();
@@ -975,7 +1002,7 @@ class CryptoScalpingTester {
     }
 }
 
-// Configuration - modify these parameters
+// Configuration
 const config = {
     symbol: 'NEARUSDT',
     timeframe: '3m',
@@ -992,26 +1019,35 @@ const config = {
     slippagePct: 0.0005,
     rsiExit1: 80,
     rsiExit2: 85,
-    backtest: true,  // Set to false for forward testing
+    backtest: false,  // Set to false for forward testing with notifications
     
     // Trailing Stop Loss Configuration
-    enableTrailingStop: true,           // Enable/disable trailing stop
-    trailingStopTriggerPct: 0.8,       // Start trailing after 0.8% profit
-    trailingStopDistancePct: 0.2,       // Trail 0.4% below highest price
-    trailingStopMode: 'replace_tp',           // 'both', 'replace_tp', 'additional'
+    enableTrailingStop: true,
+    trailingStopTriggerPct: 0.8,
+    trailingStopDistancePct: 0.2,
+    trailingStopMode: 'replace_tp',
     
-    // Real Trading Configuration (DANGEROUS - USE WITH CAUTION!)
-    realTrading: false,  // Set to true to enable real trading
-    apiKey: 'GYRWrHGXa7kjtHi4DNUnoaJcRFIrOMy1JZ1MKAGfmUKhWlRu5E3UrJsoUyiRNImD',  // Your Binance API Key
-    apiSecret: 'BfFBfvIPL9gXM4oYtnJjXHMi9e0MtBETbWUjfZTIuLvyTeki5Y4Cgb6Lf3QzHPRR',  // Your Binance API Secret
+    // Real Trading Configuration (USE WITH CAUTION!)
+    realTrading: false,
+    apiKey: '',
+    apiSecret: '',
     
     // Connection Management
-    maxReconnectAttempts: -1,  // -1 for infinite attempts
-    reconnectDelay: 5000,  // Initial reconnection delay in ms
-    heartbeatInterval: 30000,  // Check connection every 30 seconds
-    dataTimeoutMs: 120000  // 2 minutes without data triggers reconnection
+    maxReconnectAttempts: -1,
+    reconnectDelay: 5000,
+    heartbeatInterval: 30000,
+    dataTimeoutMs: 120000,
+    
+    // Notification Settings
+    enableNotifications: true,  // Master switch for all notifications
+    notifyBuyWarning: true,     // Warn when buy opportunity is approaching
+    notifyBuySignal: true,      // Alert when exact buy signal triggers
+    notifySellWarning: true,    // Warn when sell opportunity is approaching
+    notifySellSignal: true,     // Alert when exact sell signal triggers
+    buyWarningRsiThreshold: 50, // Warn when RSI drops below this (and above entry level)
+    sellWarningProfitThreshold: 0.8, // Warn at 80% of TP1 target
+    notificationCooldown: 300000 // 5 minutes between same notification type
 };
 
-// Run the tester
 const tester = new CryptoScalpingTester(config);
 tester.run().catch(console.error);
