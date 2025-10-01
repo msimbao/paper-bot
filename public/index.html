@@ -249,4 +249,137 @@
                                         <button
                                             onClick={handleStop}
                                             disabled={!status.isRunning}
-                                            className="px-6 py-3 bg-red-600 hover:bg-red-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg font-medium transition
+                                            className="px-6 py-3 bg-red-600 hover:bg-red-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg font-medium transition"
+                                        >
+                                            Stop Trading
+                                        </button>
+                                        <button
+                                            onClick={handleForceExit}
+                                            disabled={!status.isRunning || status.holdings === 0}
+                                            className="px-6 py-3 bg-orange-600 hover:bg-orange-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg font-medium transition"
+                                        >
+                                            Force Exit Position
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* Configuration */}
+                                <div className="grid md:grid-cols-2 gap-6">
+                                    {/* Basic Settings */}
+                                    <div className="bg-gray-800 rounded-lg p-6 shadow-lg">
+                                        <h2 className="text-xl font-bold mb-4">Basic Settings</h2>
+                                        <InputField label="Symbol" name="symbol" value={config.symbol} />
+                                        <div className="mb-4">
+                                            <label className="block text-sm font-medium text-gray-300 mb-1">Timeframe</label>
+                                            <select
+                                                value={config.timeframe}
+                                                onChange={(e) => updateConfig('timeframe', e.target.value)}
+                                                disabled={status.isRunning}
+                                                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                                            >
+                                                <option value="1m">1 minute</option>
+                                                <option value="3m">3 minutes</option>
+                                                <option value="5m">5 minutes</option>
+                                                <option value="15m">15 minutes</option>
+                                                <option value="30m">30 minutes</option>
+                                                <option value="1h">1 hour</option>
+                                                <option value="4h">4 hours</option>
+                                            </select>
+                                        </div>
+                                        <InputField label="Initial Balance ($)" name="initialBalance" type="number" value={config.initialBalance} step="10" min="0" />
+                                        <InputField label="EMA Period" name="emaPeriod" type="number" value={config.emaPeriod} step="1" min="1" />
+                                        <InputField label="RSI Period" name="rsiPeriod" type="number" value={config.rsiPeriod} step="1" min="1" />
+                                    </div>
+
+                                    {/* Entry/Exit Settings */}
+                                    <div className="bg-gray-800 rounded-lg p-6 shadow-lg">
+                                        <h2 className="text-xl font-bold mb-4">Entry/Exit Settings</h2>
+                                        <InputField label="RSI Entry Threshold" name="rsiEntry" type="number" value={config.rsiEntry} step="1" min="0" />
+                                        <InputField label="RSI Exit 1" name="rsiExit1" type="number" value={config.rsiExit1} step="1" min="0" />
+                                        <InputField label="RSI Exit 2" name="rsiExit2" type="number" value={config.rsiExit2} step="1" min="0" />
+                                        <InputField label="Take Profit 1 (%)" name="tp1Pct" type="number" value={config.tp1Pct} step="0.1" />
+                                        <InputField label="Take Profit 2 (%)" name="tp2Pct" type="number" value={config.tp2Pct} step="0.1" />
+                                        <InputField label="Stop Loss (%)" name="slPct" type="number" value={config.slPct} step="0.1" />
+                                    </div>
+
+                                    {/* Trailing Stop Settings */}
+                                    <div className="bg-gray-800 rounded-lg p-6 shadow-lg">
+                                        <h2 className="text-xl font-bold mb-4">Trailing Stop Settings</h2>
+                                        <CheckboxField label="Enable Trailing Stop" name="enableTrailingStop" checked={config.enableTrailingStop} />
+                                        {config.enableTrailingStop && (
+                                            <>
+                                                <InputField label="Trigger Profit (%)" name="trailingStopTriggerPct" type="number" value={config.trailingStopTriggerPct} step="0.1" />
+                                                <InputField label="Trail Distance (%)" name="trailingStopDistancePct" type="number" value={config.trailingStopDistancePct} step="0.1" />
+                                                <div className="mb-4">
+                                                    <label className="block text-sm font-medium text-gray-300 mb-1">Trailing Mode</label>
+                                                    <select
+                                                        value={config.trailingStopMode}
+                                                        onChange={(e) => updateConfig('trailingStopMode', e.target.value)}
+                                                        disabled={status.isRunning}
+                                                        className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                                                    >
+                                                        <option value="both">Balanced</option>
+                                                        <option value="replace_tp">Replace TP</option>
+                                                        <option value="additional">Additional</option>
+                                                    </select>
+                                                </div>
+                                            </>
+                                        )}
+                                    </div>
+
+                                    {/* Advanced Settings */}
+                                    <div className="bg-gray-800 rounded-lg p-6 shadow-lg">
+                                        <h2 className="text-xl font-bold mb-4">Advanced Settings</h2>
+                                        <InputField label="Fee (%)" name="feePct" type="number" value={config.feePct} step="0.0001" />
+                                        <InputField label="Slippage (%)" name="slippagePct" type="number" value={config.slippagePct} step="0.0001" />
+                                        <CheckboxField label="Real Trading (DANGER!)" name="realTrading" checked={config.realTrading} />
+                                        {config.realTrading && (
+                                            <>
+                                                <InputField label="Binance API Key" name="apiKey" value={config.apiKey} />
+                                                <InputField label="Binance API Secret" name="apiSecret" type="password" value={config.apiSecret} />
+                                                <div className="bg-red-900 border border-red-700 rounded p-3 text-sm text-red-200">
+                                                    WARNING: Real trading mode will use your actual funds!
+                                                </div>
+                                            </>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Logs Tab */}
+                        {activeTab === 'logs' && (
+                            <div className="bg-gray-800 rounded-lg p-6 shadow-lg">
+                                <div className="flex justify-between items-center mb-4">
+                                    <h2 className="text-xl font-bold">Trading Logs</h2>
+                                    <button
+                                        onClick={fetchLogs}
+                                        className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium transition"
+                                    >
+                                        Refresh
+                                    </button>
+                                </div>
+                                <div className="bg-gray-900 rounded-lg p-4 h-[600px] overflow-y-auto font-mono text-sm">
+                                    {logs.length === 0 ? (
+                                        <div className="text-gray-500 text-center py-8">No logs yet. Start trading to see activity.</div>
+                                    ) : (
+                                        logs.map((log, idx) => (
+                                            <div key={idx} className="mb-1 hover:bg-gray-800 px-2 py-1 rounded">
+                                                <span className="text-gray-500">{new Date(log.timestamp).toLocaleTimeString()}</span>
+                                                <span className={`ml-2 font-medium ${getLogColor(log.level)}`}>[{log.level}]</span>
+                                                <span className="ml-2 text-gray-300">{log.message}</span>
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
