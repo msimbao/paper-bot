@@ -3,6 +3,12 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+const apiKey = process.env.BINANCE_API_KEY;
+console.log(apiKey);
+
+const apiSecret = process.env.BINANCE_API_SECRET;
+console.log(apiSecret);
+
 class CryptoScalpingTester {
     constructor(config = {}) {
         this.config = {
@@ -1002,8 +1008,8 @@ const config = {
     
     // Real Trading Configuration (DANGEROUS - USE WITH CAUTION!)
     realTrading: false,  // Set to true to enable real trading
-    apiKey: 'GYRWrHGXa7kjtHi4DNUnoaJcRFIrOMy1JZ1MKAGfmUKhWlRu5E3UrJsoUyiRNImD',  // Your Binance API Key
-    apiSecret: 'BfFBfvIPL9gXM4oYtnJjXHMi9e0MtBETbWUjfZTIuLvyTeki5Y4Cgb6Lf3QzHPRR',  // Your Binance API Secret
+    apiKey: apiKey,  // Your Binance API Key
+    apiSecret: apiSecret,  // Your Binance API Secret
     
     // Connection Management
     maxReconnectAttempts: -1,  // -1 for infinite attempts
