@@ -2,10 +2,12 @@ const WebSocket = require('ws');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const dotenv= require('dotenv').config();
 
 const apiKey = process.env.BINANCE_API_KEY;
+console.log(apiKey);
+
 const apiSecret = process.env.BINANCE_API_SECRET;
+console.log(apiSecret);
 
 class CryptoScalpingTester {
     constructor(config = {}) {
@@ -983,8 +985,8 @@ class CryptoScalpingTester {
 const config = {
     symbol: 'AVAXUSDT',
     timeframe: '5m',
-    startDate: '2025-09-28',
-    endDate: '2025-09-30',
+    startDate: '2025-09-18',
+    endDate: '2025-09-19',
     initialBalance: 890,
     emaPeriod: 200,
     rsiPeriod: 14,
@@ -996,7 +998,7 @@ const config = {
     slippagePct: 0.0005,
     rsiExit1: 80,
     rsiExit2: 85,
-    backtest: true,  // Set to false for forward testing
+    backtest: false,  // Set to false for forward testing
     
     // Trailing Stop Loss Configuration
     enableTrailingStop: true,           // Enable/disable trailing stop
