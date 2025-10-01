@@ -86,17 +86,13 @@ class CryptoScalpingTester {
     }
 
     // Get historical data from Binance REST API
-    async getHistoricalData(startDate = null, endDate = null, limit = 1000) {
+    async getHistoricalData() {
         const symbol = this.config.symbol.toLowerCase();
         const interval = this.config.timeframe;
+        const startTime = new Date(this.config.startDate).getTime();
+        const endTime = new Date(this.config.endDate).getTime();
         
-        let url = `https://api.binance.com/api/v3/klines?symbol=${symbol.toUpperCase()}&interval=${interval}&limit=${limit}`;
-        
-        if (startDate && endDate) {
-            const startTime = new Date(startDate).getTime();
-            const endTime = new Date(endDate).getTime();
-            url += `&startTime=${startTime}&endTime=${endTime}`;
-        }
+        const url = `https://api.binance.com/api/v3/klines?symbol=${symbol.toUpperCase()}&interval=${interval}&startTime=${startTime}&endTime=${endTime}&limit=1000`;
         
         try {
             const response = await fetch(url);
@@ -113,44 +109,6 @@ class CryptoScalpingTester {
         } catch (error) {
             console.error('Error fetching historical data:', error);
             return [];
-        }
-    }
-
-    // Get recent historical data for forward testing initialization
-    async getRecentHistoricalData() {
-        console.log('📥 Fetching recent historical data for indicator initialization...');
-        
-        // Calculate how many candles we need for proper indicator calculation
-        const requiredCandles = Math.max(this.config.emaPeriod, this.config.rsiPeriod) + 50;
-        
-        try {
-            const data = await this.getHistoricalData(null, null, requiredCandles);
-            
-            if (data.length === 0) {
-                console.error('❌ Failed to fetch recent historical data');
-                return false;
-            }
-            
-            // Populate price data array with recent historical prices
-            this.priceData = data.map(d => d.close);
-            
-            console.log(`✅ Loaded ${this.priceData.length} recent candles for indicator calculation`);
-            console.log(`📊 Price range: $${Math.min(...this.priceData).toFixed(4)} - $${Math.max(...this.priceData).toFixed(4)}`);
-            
-            // Calculate and display current indicators
-            const emas = this.calculateEMA(this.priceData, this.config.emaPeriod);
-            const rsis = this.calculateRSI(this.priceData, this.config.rsiPeriod);
-            
-            const currentPrice = this.priceData[this.priceData.length - 1];
-            const currentEMA = emas[emas.length - 1];
-            const currentRSI = rsis[rsis.length - 1];
-            
-            console.log(`📈 Current indicators - Price: $${currentPrice.toFixed(4)} | EMA(${this.config.emaPeriod}): $${currentEMA.toFixed(4)} | RSI(${this.config.rsiPeriod}): ${currentRSI.toFixed(2)}`);
-            
-            return true;
-        } catch (error) {
-            console.error('❌ Error fetching recent historical data:', error);
-            return false;
         }
     }
 
@@ -204,7 +162,7 @@ class CryptoScalpingTester {
     // Run backtest
     async runBacktest() {
         console.log('📊 Starting backtest...');
-        const data = await this.getHistoricalData(this.config.startDate, this.config.endDate, 1000);
+        const data = await this.getHistoricalData();
         
         if (data.length === 0) {
             console.error('No historical data available');
@@ -239,15 +197,8 @@ class CryptoScalpingTester {
     }
 
     // Start forward testing with WebSocket
-    async startForwardTest() {
+    startForwardTest() {
         console.log('🚀 Starting forward test with live data...');
-        
-        // First, fetch recent historical data to initialize indicators
-        const dataLoaded = await this.getRecentHistoricalData();
-        if (!dataLoaded) {
-            console.error('❌ Failed to load historical data. Exiting...');
-            return;
-        }
         
         const symbol = this.config.symbol.toLowerCase();
         const wsUrl = `wss://stream.binance.com:9443/ws/${symbol}@kline_${this.config.timeframe}`;
@@ -256,7 +207,6 @@ class CryptoScalpingTester {
         
         this.ws.on('open', () => {
             console.log(`📡 Connected to Binance WebSocket for ${this.config.symbol}`);
-            console.log('🎯 Ready to process live trading signals!');
         });
 
         this.ws.on('message', (data) => {
@@ -275,18 +225,18 @@ class CryptoScalpingTester {
                     this.priceData = this.priceData.slice(-maxLength);
                 }
 
-                // Calculate indicators (we should have enough data now)
-                const emas = this.calculateEMA(this.priceData, this.config.emaPeriod);
-                const rsis = this.calculateRSI(this.priceData, this.config.rsiPeriod);
-                
-                const currentEMA = emas[emas.length - 1];
-                const currentRSI = rsis[rsis.length - 1];
-                
-                if (currentEMA && currentRSI) {
-                    console.log(`📊 ${new Date().toLocaleTimeString()} | Price: $${price.toFixed(4)} | RSI: ${currentRSI.toFixed(2)} | EMA: ${currentEMA.toFixed(4)}`);
-                    this.processSignal(price, currentEMA, currentRSI);
-                } else {
-                    console.log(`⏳ ${new Date().toLocaleTimeString()} | Price: $${price.toFixed(4)} | Calculating indicators...`);
+                // Calculate indicators
+                if (this.priceData.length >= this.config.emaPeriod) {
+                    const emas = this.calculateEMA(this.priceData, this.config.emaPeriod);
+                    const rsis = this.calculateRSI(this.priceData, this.config.rsiPeriod);
+                    
+                    const currentEMA = emas[emas.length - 1];
+                    const currentRSI = rsis[rsis.length - 1];
+                    
+                    if (currentEMA && currentRSI) {
+                        console.log(`📊 ${new Date().toLocaleTimeString()} | Price: $${price.toFixed(4)} | RSI: ${currentRSI.toFixed(2)} | EMA: ${currentEMA.toFixed(4)}`);
+                        this.processSignal(price, currentEMA, currentRSI);
+                    }
                 }
             }
         });
@@ -325,7 +275,7 @@ class CryptoScalpingTester {
         if (this.config.backtest) {
             await this.runBacktest();
         } else {
-            await this.startForwardTest();
+            this.startForwardTest();
         }
     }
 }
@@ -334,15 +284,15 @@ class CryptoScalpingTester {
 const config = {
     symbol: 'AVAXUSDT',
     timeframe: '3m',
-    startDate: '2025-08-05',
-    endDate: '2025-09-06',
+    startDate: '2025-09-16',
+    endDate: '2025-09-17',
     initialBalance: 890,
     emaPeriod: 100,
     rsiPeriod: 14,
     rsiEntry: 45,
-    tp1Pct: 1.2,
+    tp1Pct: 0.8,
     tp2Pct: 2.0,
-    slPct: -0.6,
+    slPct: -1.2,
     feePct: 0.001,
     slippagePct: 0.0005,
     rsiExit1: 80,

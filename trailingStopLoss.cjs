@@ -81,11 +81,11 @@ class CryptoScalpingTester {
         console.log(logEntry);
         
         // Write to log file
-        try {
-            fs.appendFileSync(this.logFile, logEntry + '\n');
-        } catch (error) {
-            console.error('Failed to write to log file:', error);
-        }
+        // try {
+        //     fs.appendFileSync(this.logFile, logEntry + '\n');
+        // } catch (error) {
+        //     console.error('Failed to write to log file:', error);
+        // }
     }
 
     // Calculate EMA
@@ -977,17 +977,17 @@ class CryptoScalpingTester {
 
 // Configuration - modify these parameters
 const config = {
-    symbol: 'NEARUSDT',
-    timeframe: '3m',
-    startDate: '2025-09-18',
-    endDate: '2025-09-19',
+    symbol: 'AVAXUSDT',
+    timeframe: '5m',
+    startDate: '2025-09-28',
+    endDate: '2025-09-30',
     initialBalance: 890,
-    emaPeriod: 100,
+    emaPeriod: 200,
     rsiPeriod: 14,
     rsiEntry: 45,
-    tp1Pct: 0.6,
-    tp2Pct: 1.2,
-    slPct: -1.5,
+    tp1Pct: 1.2,
+    tp2Pct: 2.0,
+    slPct: -0.8,
     feePct: 0.001,
     slippagePct: 0.0005,
     rsiExit1: 80,

@@ -141,6 +141,7 @@ class CryptoScalpingTester {
                         `${this.config.symbol} RSI: ${rsi.toFixed(2)} (${rsiToEntry.toFixed(1)} from entry)\nPrice: $${price.toFixed(4)}\nPrepare to buy soon!`,
                         'default'
                     );
+                            termux('⚠️ BUY OPPORTUNITY APPROACHING');
                     this.updateNotificationTime('buyWarning');
                 }
             }
@@ -153,6 +154,7 @@ class CryptoScalpingTester {
                         `${this.config.symbol} BUY NOW!\nPrice: $${price.toFixed(4)}\nRSI: ${rsi.toFixed(2)}\nAmount: ${(this.balance / price).toFixed(6)}`,
                         'high'
                     );
+                    termux('🟢 BUY SIGNAL TRIGGERED');
                     this.updateNotificationTime('buySignal');
                 }
             }
@@ -174,6 +176,7 @@ class CryptoScalpingTester {
                         `${this.config.symbol} Profit: ${currentProfitPct.toFixed(2)}%\nRSI: ${rsi.toFixed(2)}\nTarget: ${this.config.tp1Pct}% or RSI ${this.config.rsiExit1}\nPrepare to sell soon!`,
                         'default'
                     );
+                    termux('⚠️ SELL OPPORTUNITY APPROACHING');
                     this.updateNotificationTime('sellWarning');
                 }
             }
@@ -197,6 +200,7 @@ class CryptoScalpingTester {
                         `${this.config.symbol} SELL NOW!\nPrice: $${price.toFixed(4)}\nProfit: ${currentProfitPct.toFixed(2)}%\nRSI: ${rsi.toFixed(2)}\nAmount: ${this.holdings.toFixed(6)}`,
                         'high'
                     );
+                    termux('🔴 SELL SIGNAL');
                     this.updateNotificationTime('sellSignal');
                 }
             }
@@ -210,6 +214,7 @@ class CryptoScalpingTester {
                         `${this.config.symbol} Profit: ${currentProfitPct.toFixed(2)}%\nTrailing stop now active\nLocking in gains!`,
                         'default'
                     );
+                    termux('🎯 TRAILING STOP ACTIVATED');
                     this.updateNotificationTime('trailingStop');
                 }
             }
