@@ -146,7 +146,7 @@ class CryptoScalpingTester {
     }
 
     async fetchKlinesBatch(symbol, interval, startTime, endTime, limit = 1000) {
-        let url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+        let url = `https://api.binance.us/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
         if (startTime) url += `&startTime=${startTime}`;
         if (endTime) url += `&endTime=${endTime}`;
         const response = await fetch(url);
@@ -238,7 +238,7 @@ class CryptoScalpingTester {
         if (this.isConnecting) return;
         this.isConnecting = true;
         const symbol = this.config.symbol.toLowerCase();
-        const wsUrl = `wss://stream.binance.com:9443/ws/${symbol}@kline_${this.config.timeframe}`;
+        const wsUrl = `wss://stream.binance.us:9443/ws/${symbol}@kline_${this.config.timeframe}`;
         this.log(`🔌 Connecting to ${wsUrl}`, 'INFO');
         this.ws = new WebSocket(wsUrl);
         
