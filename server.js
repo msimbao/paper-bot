@@ -52,7 +52,7 @@ class CryptoScalpingTester {
             maxReconnectAttempts: config.maxReconnectAttempts || -1,
             reconnectDelay: config.reconnectDelay || 5000,
             heartbeatInterval: config.heartbeatInterval || 30000,
-            dataTimeoutMs: config.dataTimeoutMs || 120000
+            dataTimeoutMs: config.dataTimeoutMs || 185000
         };
         
         this.balance = this.config.initialBalance;
