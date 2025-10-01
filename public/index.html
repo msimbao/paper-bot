@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crypto Trading Bot</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+    <div id="root"></div>
+    
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        function App() {
+            const [activeTab, setActiveTab] = useState('control');
+            const [config, setConfig] = useState({
+                symbol: 'AVAXUSDT',
+                timeframe: '5m',
+                initialBalance: 1000,
+                emaPeriod: 100,
+                rsiPeriod: 14,
+                rsiEntry: 45,
+                tp1Pct: 1.2,
+                tp2Pct: 2.0,
+                slPct: -1.2,
+                feePct: 0.00075,
+                slippagePct: 0.0005,
+                rsiExit1: 100,
+                rsiExit2: 85,
+                enableTrailingStop: false,
+                trailingStopTriggerPct: 0.8,
+                trailingStopDistancePct: 0.4,
+                trailingStopMode: 'both',
+                realTrading: false,
+                apiKey: '',
+                apiSecret: ''
+            });
+            const [status, setStatus] = useState({ isRunning: false });
+            const [logs, setLogs] = useState([]);
+            const [loading, setLoading] = useState(false);
+
+            useEffect(() => {
+                const interval = setInterval(fetchStatus, 2000);
+                return () => clearInterval(interval);
+            }, []);
+
+            useEffect(() => {
+                if (activeTab === 'logs') {
+                    fetchLogs();
+                    const interval = setInterval(fetchLogs, 3000);
+                    return () => clearInterval(interval);
+                }
+            }, [activeTab]);
+
+            const fetchStatus = async () => {
+                try {
+                    const res = await fetch('/api/status');
+                    const data = await res.json();
+                    setStatus(data);
+                } catch (error) {
+                    console.error('Failed to fetch status:', error);
+                }
+            };
+
+            const fetchLogs = async () => {
+                try {
+                    const res = await fetch('/api/logs');
+                    const data = await res.json();
+                    setLogs(data);
+                } catch (error) {
+                    console.error('Failed to fetch logs:', error);
+                }
+            };
+
+            const handleStart = async () => {
+                setLoading(true);
+                try {
+                    const res = await fetch('/api/start', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(config)
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        alert('Bot started successfully!');
+                        fetchStatus();
+                    } else {
+                        alert('Failed to start bot: ' + (data.error || 'Unknown error'));
+                    }
+                } catch (error) {
+                    alert('Error: ' + error.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const handleStop = async () => {
+                try {
+                    const res = await fetch('/api/stop', { method: 'POST' });
+                    const data = await res.json();
+                    if (data.success) {
+                        alert('Bot stopped');
+                        fetchStatus();
+                    }
+                } catch (error) {
+                    alert('Error: ' + error.message);
+                }
+            };
+
+            const handleForceExit = async () => {
+                if (!confirm('Are you sure you want to force exit the current position?')) return;
+                try {
+                    const res = await fetch('/api/force-exit', { method: 'POST' });
+                    const data = await res.json();
+                    if (data.success) {
+                        alert('Force exit triggered! Position will close on next price update.');
+                    } else {
+                        alert(data.error || 'Failed to trigger exit');
+                    }
+                } catch (error) {
+                    alert('Error: ' + error.message);
+                }
+            };
+
+            const updateConfig = (key, value) => {
+                setConfig(prev => ({ ...prev, [key]: value }));
+            };
+
+            const InputField = ({ label, name, type = "text", value, step, min }) => (
+                <div className="mb-4">
+                    <label className="block text-sm font-medium text-gray-300 mb-1">{label}</label>
+                    <input
+                        type={type}
+                        value={value}
+                        onChange={(e) => updateConfig(name, type === 'number' ? parseFloat(e.target.value) : e.target.value)}
+                        step={step}
+                        min={min}
+                        disabled={status.isRunning}
+                        className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50"
+                    />
+                </div>
+            );
+
+            const CheckboxField = ({ label, name, checked }) => (
+                <div className="flex items-center mb-4">
+                    <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => updateConfig(name, e.target.checked)}
+                        disabled={status.isRunning}
+                        className="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500 disabled:opacity-50"
+                    />
+                    <label className="ml-2 text-sm font-medium text-gray-300">{label}</label>
+                </div>
+            );
+
+            const getLogColor = (level) => {
+                switch(level) {
+                    case 'ERROR': return 'text-red-400';
+                    case 'WARNING': return 'text-yellow-400';
+                    case 'SUCCESS': return 'text-green-400';
+                    case 'TRADE': return 'text-blue-400';
+                    case 'DATA': return 'text-gray-400';
+                    default: return 'text-gray-300';
+                }
+            };
+
+            const currentPnL = status.holdings > 0 && status.entryPrice > 0 
+                ? ((status.currentPrice - status.entryPrice) / status.entryPrice * 100).toFixed(2)
+                : 0;
+
+            return (
+                <div className="min-h-screen bg-gray-900 text-white">
+                    <div className="container mx-auto px-4 py-6">
+                        <h1 className="text-3xl font-bold mb-6 text-center">Crypto Trading Bot</h1>
+                        
+                        {/* Status Bar */}
+                        <div className="bg-gray-800 rounded-lg p-4 mb-6 shadow-lg">
+                            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                                <div>
+                                    <div className="text-gray-400 text-sm">Status</div>
+                                    <div className={`font-bold ${status.isRunning ? 'text-green-400' : 'text-red-400'}`}>
+                                        {status.isRunning ? '🟢 Running' : '🔴 Stopped'}
+                                    </div>
+                                </div>
+                                <div>
+                                    <div className="text-gray-400 text-sm">Balance</div>
+                                    <div className="font-bold">${status.balance?.toFixed(2) || '0.00'}</div>
+                                </div>
+                                <div>
+                                    <div className="text-gray-400 text-sm">Holdings</div>
+                                    <div className="font-bold">{status.holdings?.toFixed(6) || '0.000000'}</div>
+                                </div>
+                                <div>
+                                    <div className="text-gray-400 text-sm">Current P&L</div>
+                                    <div className={`font-bold ${parseFloat(currentPnL) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                        {currentPnL}%
+                                    </div>
+                                </div>
+                                <div>
+                                    <div className="text-gray-400 text-sm">Win/Loss</div>
+                                    <div className="font-bold">{status.wins || 0}/{status.losses || 0}</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Tabs */}
+                        <div className="flex gap-4 mb-6">
+                            <button
+                                onClick={() => setActiveTab('control')}
+                                className={`px-6 py-2 rounded-lg font-medium transition ${
+                                    activeTab === 'control' 
+                                        ? 'bg-blue-600 text-white' 
+                                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                                }`}
+                            >
+                                Control Panel
+                            </button>
+                            <button
+                                onClick={() => setActiveTab('logs')}
+                                className={`px-6 py-2 rounded-lg font-medium transition ${
+                                    activeTab === 'logs' 
+                                        ? 'bg-blue-600 text-white' 
+                                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                                }`}
+                            >
+                                Logs
+                            </button>
+                        </div>
+
+                        {/* Control Panel Tab */}
+                        {activeTab === 'control' && (
+                            <div className="space-y-6">
+                                {/* Action Buttons */}
+                                <div className="bg-gray-800 rounded-lg p-6 shadow-lg">
+                                    <h2 className="text-xl font-bold mb-4">Actions</h2>
+                                    <div className="flex flex-wrap gap-4">
+                                        <button
+                                            onClick={handleStart}
+                                            disabled={status.isRunning || loading}
+                                            className="px-6 py-3 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg font-medium transition"
+                                        >
+                                            {loading ? 'Starting...' : 'Start Trading'}
+                                        </button>
+                                        <button
+                                            onClick={handleStop}
+                                            disabled={!status.isRunning}
+                                            className="px-6 py-3 bg-red-600 hover:bg-red-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg font-medium transition
