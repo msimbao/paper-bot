@@ -1084,7 +1084,7 @@ process.on('SIGTERM', async () => {
 
 // Configuration - modify these parameters
 const config = {
-    symbol: 'NEARUSDT',
+    symbol: 'AVAXUSDT',
     timeframe: '3m',
     startDate: '2024-01-18',
     endDate: '2024-03-19',
@@ -1099,7 +1099,7 @@ const config = {
     slippagePct: 0.0005,
     rsiExit1: 80,
     rsiExit2: 85,
-    backtest: true,  // Set to false for forward testing
+    backtest: false,  // Set to false for forward testing
     
     // Trailing Stop Loss Configuration
     enableTrailingStop: true,           // Enable/disable trailing stop
