@@ -184,6 +184,90 @@ class CryptoScalpingTester {
         this.highestPriceSinceEntry = 0;
         this.trailingStopPrice = 0;
     }
+
+    // Calculate unrealized P&L including fees
+calculateUnrealizedPnL(currentPrice) {
+    if (this.holdings === 0) return 0;
+    
+    // Calculate what we'd get if we sold now (minus fees)
+    const sellPrice = currentPrice * (1 - this.config.feePct);
+    const currentValue = this.holdings * sellPrice;
+    
+    // What we paid (including entry slippage which was already applied to entryPrice)
+    const costBasis = this.holdings * this.entryPrice;
+    
+    // P&L in dollar terms
+    const pnlDollar = currentValue - costBasis;
+    
+    // P&L in percentage terms
+    const pnlPercent = (pnlDollar / costBasis) * 100;
+    
+    return { pnlDollar, pnlPercent };
+}
+
+// Graceful shutdown - liquidate positions before exit
+async gracefulShutdown() {
+    this.log('\n🛑 Shutdown signal received - initiating graceful shutdown...', 'WARNING');
+    this.shouldReconnect = false;
+    
+    // If holding a position, sell it
+    if (this.holdings > 0) {
+        const currentPrice = this.priceData[this.priceData.length - 1];
+        
+        if (!currentPrice) {
+            this.log('❌ Cannot liquidate position - no current price data', 'ERROR');
+        } else {
+            this.log(`💼 Liquidating position: ${this.holdings.toFixed(6)} ${this.config.symbol} at market price...`, 'WARNING');
+            
+            if (this.config.realTrading) {
+                try {
+                    await this.placeMarketOrder('SELL', this.holdings);
+                    const { pnlDollar, pnlPercent } = this.calculateUnrealizedPnL(currentPrice);
+                    this.balance = this.holdings * currentPrice * (1 - this.config.feePct);
+                    this.log(`✅ Position liquidated | P&L: $${pnlDollar.toFixed(2)} (${pnlPercent.toFixed(2)}%)`, 'TRADE');
+                    this.holdings = 0;
+                } catch (error) {
+                    this.log(`❌ Failed to liquidate position: ${error.message}`, 'ERROR');
+                    this.log('⚠️ WARNING: You still have an open position on Binance!', 'ERROR');
+                }
+            } else {
+                // Paper trading liquidation
+                const { pnlDollar, pnlPercent } = this.calculateUnrealizedPnL(currentPrice);
+                this.balance = this.holdings * currentPrice * (1 - this.config.feePct);
+                this.holdings = 0;
+                this.log(`✅ Position liquidated (paper) | P&L: $${pnlDollar.toFixed(2)} (${pnlPercent.toFixed(2)}%)`, 'TRADE');
+            }
+        }
+    } else {
+        this.log('💼 No open positions to liquidate', 'INFO');
+    }
+    
+    // Close WebSocket
+    if (this.ws) {
+        this.ws.close();
+    }
+    
+    if (this.heartbeatTimer) {
+        clearInterval(this.heartbeatTimer);
+    }
+    
+    // Print final results
+    const finalBalance = this.balance + (this.holdings * (this.priceData[this.priceData.length - 1] || 0));
+    const roi = ((finalBalance - this.config.initialBalance) / this.config.initialBalance) * 100;
+    
+    this.log('\n📋 FINAL RESULTS:', 'RESULT');
+    this.log(`💰 Final Balance: $${finalBalance.toFixed(2)}`, 'RESULT');
+    this.log(`📈 ROI: ${roi.toFixed(2)}%`, 'RESULT');
+    this.log(`✅ Wins: ${this.wins}`, 'RESULT');
+    this.log(`❌ Losses: ${this.losses}`, 'RESULT');
+    if (this.wins + this.losses > 0) {
+        this.log(`🎯 Win Rate: ${((this.wins / (this.wins + this.losses)) * 100).toFixed(1)}%`, 'RESULT');
+    }
+    
+    this.log('\n👋 Shutdown complete', 'INFO');
+    process.exit(0);
+}
+
     createSignature(queryString) {
         return crypto.createHmac('sha256', this.config.apiSecret)
                     .update(queryString)
@@ -774,13 +858,21 @@ class CryptoScalpingTester {
         const currentEMA = emas[emas.length - 1];
         const currentRSI = rsis[rsis.length - 1];
         
-        if (currentEMA && currentRSI) {
-            const trailingInfo = this.trailingStopActive ? 
-                ` | Trail: ${this.trailingStopPrice.toFixed(4)} (High: ${this.highestPriceSinceEntry.toFixed(4)})` : '';
-            
-            this.log(`📊 ${new Date().toLocaleTimeString()} | Price: ${price.toFixed(4)} | RSI: ${currentRSI.toFixed(2)} | EMA: ${currentEMA.toFixed(4)} | Holdings: ${this.holdings.toFixed(6)}${trailingInfo}`, 'DATA');
-            await this.processSignal(price, currentEMA, currentRSI);
-        }
+       if (currentEMA && currentRSI) {
+    const trailingInfo = this.trailingStopActive ? 
+        ` | Trail: ${this.trailingStopPrice.toFixed(4)} (High: ${this.highestPriceSinceEntry.toFixed(4)})` : '';
+    
+    // Calculate unrealized P&L if holding position
+    let pnlInfo = '';
+    if (this.holdings > 0) {
+        const { pnlDollar, pnlPercent } = this.calculateUnrealizedPnL(price);
+        const pnlColor = pnlPercent >= 0 ? '🟢' : '🔴';
+        pnlInfo = ` | ${pnlColor} P&L: $${pnlDollar.toFixed(2)} (${pnlPercent.toFixed(2)}%)`;
+    }
+    
+    this.log(`📊 ${new Date().toLocaleTimeString()} | Price: ${price.toFixed(4)} | RSI: ${currentRSI.toFixed(2)} | EMA: ${currentEMA.toFixed(4)} | Holdings: ${this.holdings.toFixed(6)}${pnlInfo}${trailingInfo}`, 'DATA');
+    await this.processSignal(price, currentEMA, currentRSI);
+}
     }
 
     // Schedule reconnection attempt
@@ -946,29 +1038,38 @@ class CryptoScalpingTester {
         await this.connectWebSocket();
         
         // Handle graceful shutdown
-        process.on('SIGINT', () => {
-            this.log('\n🛑 Shutdown signal received...', 'INFO');
-            this.shouldReconnect = false;
+        // process.on('SIGINT', () => {
+        //     this.log('\n🛑 Shutdown signal received...', 'INFO');
+        //     this.shouldReconnect = false;
             
-            if (this.ws) {
-                this.ws.close();
-            }
+        //     if (this.ws) {
+        //         this.ws.close();
+        //     }
             
-            if (this.heartbeatTimer) {
-                clearInterval(this.heartbeatTimer);
-            }
+        //     if (this.heartbeatTimer) {
+        //         clearInterval(this.heartbeatTimer);
+        //     }
             
-            const finalBalance = this.balance + (this.holdings * (this.priceData[this.priceData.length - 1] || 0));
-            const roi = ((finalBalance - this.config.initialBalance) / this.config.initialBalance) * 100;
+        //     const finalBalance = this.balance + (this.holdings * (this.priceData[this.priceData.length - 1] || 0));
+        //     const roi = ((finalBalance - this.config.initialBalance) / this.config.initialBalance) * 100;
             
-            this.log('\n📋 FORWARD TEST RESULTS:', 'RESULT');
-            this.log(`Final Balance: $${finalBalance.toFixed(2)}`, 'RESULT');
-            this.log(`ROI: ${roi.toFixed(2)}%`, 'RESULT');
-            this.log(`Wins: ${this.wins}`, 'RESULT');
-            this.log(`Losses: ${this.losses}`, 'RESULT');
+        //     this.log('\n📋 FORWARD TEST RESULTS:', 'RESULT');
+        //     this.log(`Final Balance: $${finalBalance.toFixed(2)}`, 'RESULT');
+        //     this.log(`ROI: ${roi.toFixed(2)}%`, 'RESULT');
+        //     this.log(`Wins: ${this.wins}`, 'RESULT');
+        //     this.log(`Losses: ${this.losses}`, 'RESULT');
             
-            process.exit(0);
-        });
+        //     process.exit(0);
+        // });
+
+        process.on('SIGINT', async () => {
+    await this.gracefulShutdown();
+});
+
+// Also handle SIGTERM for container environments
+process.on('SIGTERM', async () => {
+    await this.gracefulShutdown();
+});
     }
 
     // Main run method
@@ -983,17 +1084,17 @@ class CryptoScalpingTester {
 
 // Configuration - modify these parameters
 const config = {
-    symbol: 'AVAXUSDT',
-    timeframe: '5m',
-    startDate: '2025-09-18',
-    endDate: '2025-09-19',
+    symbol: 'NEARUSDT',
+    timeframe: '3m',
+    startDate: '2024-01-18',
+    endDate: '2024-03-19',
     initialBalance: 890,
-    emaPeriod: 200,
+    emaPeriod: 100,
     rsiPeriod: 14,
-    rsiEntry: 45,
+    rsiEntry: 40,
     tp1Pct: 1.2,
     tp2Pct: 2.0,
-    slPct: -0.8,
+    slPct: -1.2,
     feePct: 0.001,
     slippagePct: 0.0005,
     rsiExit1: 80,

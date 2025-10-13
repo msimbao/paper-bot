@@ -3,6 +3,12 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+const apiKey = process.env.BINANCE_API_KEY;
+console.log(apiKey);
+
+const apiSecret = process.env.BINANCE_API_SECRET;
+console.log(apiSecret);
+
 class CryptoScalpingTester {
     constructor(config = {}) {
         this.config = {
@@ -22,6 +28,12 @@ class CryptoScalpingTester {
             rsiExit1: config.rsiExit1 || 100,
             rsiExit2: config.rsiExit2 || 85,
             backtest: config.backtest || false,
+            
+            // Trailing Stop Loss Configuration
+            enableTrailingStop: config.enableTrailingStop || false,
+            trailingStopTriggerPct: config.trailingStopTriggerPct || 0.8, // Start trailing after 0.8% profit
+            trailingStopDistancePct: config.trailingStopDistancePct || 0.4, // Trail 0.4% below highest price
+            trailingStopMode: config.trailingStopMode || 'both', // 'both', 'replace_tp', 'additional'
             // Real trading options
             realTrading: config.realTrading || false,
             apiKey: config.apiKey || '',
@@ -42,6 +54,11 @@ class CryptoScalpingTester {
         this.priceData = [];
         this.ws = null;
         
+        // Trailing stop loss tracking
+        this.highestPriceSinceEntry = 0;
+        this.trailingStopPrice = 0;
+        this.trailingStopActive = false;
+        
         // Connection management
         this.reconnectAttempts = 0;
         this.isConnecting = false;
@@ -54,6 +71,18 @@ class CryptoScalpingTester {
         // Logging
         this.logFile = `trading_log_${new Date().toISOString().split('T')[0]}.txt`;
         this.initializeLogging();
+
+        
+    }
+
+ initializeTradeTracking() {
+        this.trades = [];
+        this.priceHistory = [];
+        this.emaHistory = [];
+        this.rsiHistory = [];
+        this.timestamps = [];
+        this.trailingStopHistory = [];
+        this.trailingStopEvents = [];
     }
 
     // Initialize logging system
@@ -70,11 +99,11 @@ class CryptoScalpingTester {
         console.log(logEntry);
         
         // Write to log file
-        try {
-            fs.appendFileSync(this.logFile, logEntry + '\n');
-        } catch (error) {
-            console.error('Failed to write to log file:', error);
-        }
+        // try {
+        //     fs.appendFileSync(this.logFile, logEntry + '\n');
+        // } catch (error) {
+        //     console.error('Failed to write to log file:', error);
+        // }
     }
 
     // Calculate EMA
@@ -129,7 +158,128 @@ class CryptoScalpingTester {
         return rsi;
     }
 
-    // Create Binance API signature
+    // Update trailing stop loss
+    updateTrailingStop(currentPrice) {
+        if (!this.config.enableTrailingStop || this.holdings === 0) return;
+
+        const currentProfitPct = ((currentPrice - this.entryPrice) / this.entryPrice) * 100;
+        
+        // Check if we should activate trailing stop
+        if (!this.trailingStopActive && currentProfitPct >= this.config.trailingStopTriggerPct) {
+            this.trailingStopActive = true;
+            this.highestPriceSinceEntry = currentPrice;
+            this.trailingStopPrice = currentPrice * (1 - this.config.trailingStopDistancePct / 100);
+            
+            this.log(`🎯 Trailing stop ACTIVATED at ${currentPrice.toFixed(4)} | Profit: ${currentProfitPct.toFixed(2)}% | Trail Stop: ${this.trailingStopPrice.toFixed(4)}`, 'INFO');
+        }
+        
+        // Update trailing stop if active and price is rising
+        if (this.trailingStopActive && currentPrice > this.highestPriceSinceEntry) {
+            this.highestPriceSinceEntry = currentPrice;
+            const newTrailingStopPrice = currentPrice * (1 - this.config.trailingStopDistancePct / 100);
+            
+            if (newTrailingStopPrice > this.trailingStopPrice) {
+                this.trailingStopPrice = newTrailingStopPrice;
+                this.log(`📈 Trailing stop UPDATED to ${this.trailingStopPrice.toFixed(4)} | High: ${currentPrice.toFixed(4)} | Profit: ${currentProfitPct.toFixed(2)}%`, 'INFO');
+            }
+        }
+    }
+
+    // Check if trailing stop is triggered
+    isTrailingStopTriggered(currentPrice) {
+        return this.trailingStopActive && currentPrice <= this.trailingStopPrice;
+    }
+
+    // Reset trailing stop for new trade
+    resetTrailingStop() {
+        this.trailingStopActive = false;
+        this.highestPriceSinceEntry = 0;
+        this.trailingStopPrice = 0;
+    }
+
+    // Calculate unrealized P&L including fees
+calculateUnrealizedPnL(currentPrice) {
+    if (this.holdings === 0) return 0;
+    
+    // Calculate what we'd get if we sold now (minus fees)
+    const sellPrice = currentPrice * (1 - this.config.feePct);
+    const currentValue = this.holdings * sellPrice;
+    
+    // What we paid (including entry slippage which was already applied to entryPrice)
+    const costBasis = this.holdings * this.entryPrice;
+    
+    // P&L in dollar terms
+    const pnlDollar = currentValue - costBasis;
+    
+    // P&L in percentage terms
+    const pnlPercent = (pnlDollar / costBasis) * 100;
+    
+    return { pnlDollar, pnlPercent };
+}
+
+// Graceful shutdown - liquidate positions before exit
+async gracefulShutdown() {
+    this.log('\n🛑 Shutdown signal received - initiating graceful shutdown...', 'WARNING');
+    this.shouldReconnect = false;
+    
+    // If holding a position, sell it
+    if (this.holdings > 0) {
+        const currentPrice = this.priceData[this.priceData.length - 1];
+        
+        if (!currentPrice) {
+            this.log('❌ Cannot liquidate position - no current price data', 'ERROR');
+        } else {
+            this.log(`💼 Liquidating position: ${this.holdings.toFixed(6)} ${this.config.symbol} at market price...`, 'WARNING');
+            
+            if (this.config.realTrading) {
+                try {
+                    await this.placeMarketOrder('SELL', this.holdings);
+                    const { pnlDollar, pnlPercent } = this.calculateUnrealizedPnL(currentPrice);
+                    this.balance = this.holdings * currentPrice * (1 - this.config.feePct);
+                    this.log(`✅ Position liquidated | P&L: $${pnlDollar.toFixed(2)} (${pnlPercent.toFixed(2)}%)`, 'TRADE');
+                    this.holdings = 0;
+                } catch (error) {
+                    this.log(`❌ Failed to liquidate position: ${error.message}`, 'ERROR');
+                    this.log('⚠️ WARNING: You still have an open position on Binance!', 'ERROR');
+                }
+            } else {
+                // Paper trading liquidation
+                const { pnlDollar, pnlPercent } = this.calculateUnrealizedPnL(currentPrice);
+                this.balance = this.holdings * currentPrice * (1 - this.config.feePct);
+                this.holdings = 0;
+                this.log(`✅ Position liquidated (paper) | P&L: $${pnlDollar.toFixed(2)} (${pnlPercent.toFixed(2)}%)`, 'TRADE');
+            }
+        }
+    } else {
+        this.log('💼 No open positions to liquidate', 'INFO');
+    }
+    
+    // Close WebSocket
+    if (this.ws) {
+        this.ws.close();
+    }
+    
+    if (this.heartbeatTimer) {
+        clearInterval(this.heartbeatTimer);
+    }
+    
+    // Print final results
+    const finalBalance = this.balance + (this.holdings * (this.priceData[this.priceData.length - 1] || 0));
+    const roi = ((finalBalance - this.config.initialBalance) / this.config.initialBalance) * 100;
+    
+    this.log('\n📋 FINAL RESULTS:', 'RESULT');
+    this.log(`💰 Final Balance: $${finalBalance.toFixed(2)}`, 'RESULT');
+    this.log(`📈 ROI: ${roi.toFixed(2)}%`, 'RESULT');
+    this.log(`✅ Wins: ${this.wins}`, 'RESULT');
+    this.log(`❌ Losses: ${this.losses}`, 'RESULT');
+    if (this.wins + this.losses > 0) {
+        this.log(`🎯 Win Rate: ${((this.wins / (this.wins + this.losses)) * 100).toFixed(1)}%`, 'RESULT');
+    }
+    
+    this.log('\n👋 Shutdown complete', 'INFO');
+    process.exit(0);
+}
+
     createSignature(queryString) {
         return crypto.createHmac('sha256', this.config.apiSecret)
                     .update(queryString)
@@ -239,109 +389,235 @@ class CryptoScalpingTester {
     }
 
     // Get complete historical data with pagination
-    async getHistoricalData(startDate = null, endDate = null, limit = 1000) {
-        const symbol = this.config.symbol.toUpperCase();
-        const interval = this.config.timeframe;
+    // async getHistoricalData(startDate = null, endDate = null, limit = 1000) {
+    //     const symbol = this.config.symbol.toUpperCase();
+    //     const interval = this.config.timeframe;
         
-        // For recent data (no date range specified)
-        if (!startDate && !endDate) {
-            try {
-                const data = await this.fetchKlinesBatch(symbol, interval, null, null, limit);
-                return data.map(kline => ({
-                    time: new Date(kline[0]),
-                    open: parseFloat(kline[1]),
-                    high: parseFloat(kline[2]),
-                    low: parseFloat(kline[3]),
-                    close: parseFloat(kline[4]),
-                    volume: parseFloat(kline[5])
-                }));
-            } catch (error) {
-                this.log(`Error fetching recent historical data: ${error.message}`, 'ERROR');
-                return [];
-            }
-        }
+    //     // For recent data (no date range specified)
+    //     if (!startDate && !endDate) {
+    //         try {
+    //             const data = await this.fetchKlinesBatch(symbol, interval, null, null, limit);
+    //             return data.map(kline => ({
+    //                 time: new Date(kline[0]),
+    //                 open: parseFloat(kline[1]),
+    //                 high: parseFloat(kline[2]),
+    //                 low: parseFloat(kline[3]),
+    //                 close: parseFloat(kline[4]),
+    //                 volume: parseFloat(kline[5])
+    //             }));
+    //         } catch (error) {
+    //             this.log(`Error fetching recent historical data: ${error.message}`, 'ERROR');
+    //             return [];
+    //         }
+    //     }
 
-        // For date range queries - implement pagination
-        const startTime = new Date(startDate).getTime();
-        const endTime = new Date(endDate).getTime();
-        const timeframeMs = this.getTimeframeMs();
+    //     // For date range queries - implement pagination
+    //     const startTime = new Date(startDate).getTime();
+    //     const endTime = new Date(endDate).getTime();
+    //     const timeframeMs = this.getTimeframeMs();
         
-        this.log(`📅 Fetching historical data from ${startDate} to ${endDate}`, 'INFO');
-        this.log(`⏱️ Timeframe: ${interval} (${timeframeMs}ms per candle)`, 'INFO');
+    //     this.log(`📅 Fetching historical data from ${startDate} to ${endDate}`, 'INFO');
+    //     this.log(`⏱️ Timeframe: ${interval} (${timeframeMs}ms per candle)`, 'INFO');
         
-        const allKlines = [];
-        let currentStartTime = startTime;
-        let batchCount = 0;
-        const maxBatches = 50; // Safety limit to prevent infinite loops
+    //     const allKlines = [];
+    //     let currentStartTime = startTime;
+    //     let batchCount = 0;
+    //     const maxBatches = 50; // Safety limit to prevent infinite loops
         
-        while (currentStartTime < endTime && batchCount < maxBatches) {
-            try {
-                // Calculate end time for this batch (1000 candles worth or actual end time, whichever is smaller)
-                const batchEndTime = Math.min(currentStartTime + (1000 * timeframeMs), endTime);
+    //     while (currentStartTime < endTime && batchCount < maxBatches) {
+    //         try {
+    //             // Calculate end time for this batch (1000 candles worth or actual end time, whichever is smaller)
+    //             const batchEndTime = Math.min(currentStartTime + (1000 * timeframeMs), endTime);
                 
-                this.log(`📦 Fetching batch ${batchCount + 1}: ${new Date(currentStartTime).toISOString()} to ${new Date(batchEndTime).toISOString()}`, 'INFO');
+    //             this.log(`📦 Fetching batch ${batchCount + 1}: ${new Date(currentStartTime).toISOString()} to ${new Date(batchEndTime).toISOString()}`, 'INFO');
                 
-                const batchData = await this.fetchKlinesBatch(symbol, interval, currentStartTime, batchEndTime, 1000);
+    //             const batchData = await this.fetchKlinesBatch(symbol, interval, currentStartTime, batchEndTime, 1000);
                 
-                if (batchData.length === 0) {
-                    this.log('📭 No more data available', 'INFO');
-                    break;
-                }
+    //             if (batchData.length === 0) {
+    //                 this.log('📭 No more data available', 'INFO');
+    //                 break;
+    //             }
                 
-                allKlines.push(...batchData);
+    //             allKlines.push(...batchData);
                 
-                // Move start time to after the last candle we received
-                const lastCandleTime = batchData[batchData.length - 1][0];
-                currentStartTime = lastCandleTime + timeframeMs;
+    //             // Move start time to after the last candle we received
+    //             const lastCandleTime = batchData[batchData.length - 1][0];
+    //             currentStartTime = lastCandleTime + timeframeMs;
                 
-                batchCount++;
+    //             batchCount++;
                 
-                this.log(`📊 Batch ${batchCount} complete: ${batchData.length} candles (Total: ${allKlines.length})`, 'INFO');
+    //             this.log(`📊 Batch ${batchCount} complete: ${batchData.length} candles (Total: ${allKlines.length})`, 'INFO');
                 
-                // Rate limiting - be nice to Binance API
-                if (batchCount < maxBatches) {
-                    await new Promise(resolve => setTimeout(resolve, 100)); // 100ms delay between requests
-                }
+    //             // Rate limiting - be nice to Binance API
+    //             if (batchCount < maxBatches) {
+    //                 await new Promise(resolve => setTimeout(resolve, 100)); // 100ms delay between requests
+    //             }
                 
-                // If we got less than 1000 candles, we've reached the end
-                if (batchData.length < 1000) {
-                    break;
-                }
+    //             // If we got less than 1000 candles, we've reached the end
+    //             if (batchData.length < 1000) {
+    //                 break;
+    //             }
                 
-            } catch (error) {
-                this.log(`❌ Error fetching batch ${batchCount + 1}: ${error.message}`, 'ERROR');
+    //         } catch (error) {
+    //             this.log(`❌ Error fetching batch ${batchCount + 1}: ${error.message}`, 'ERROR');
                 
-                // Wait longer before retrying
-                await new Promise(resolve => setTimeout(resolve, 1000));
+    //             // Wait longer before retrying
+    //             await new Promise(resolve => setTimeout(resolve, 1000));
                 
-                // Try to continue with next batch
-                currentStartTime += 1000 * timeframeMs;
-                batchCount++;
-            }
+    //             // Try to continue with next batch
+    //             currentStartTime += 1000 * timeframeMs;
+    //             batchCount++;
+    //         }
+    //     }
+        
+    //     if (batchCount >= maxBatches) {
+    //         this.log(`⚠️ Reached maximum batch limit (${maxBatches}). Data may be incomplete.`, 'WARNING');
+    //     }
+        
+    //     this.log(`✅ Historical data collection complete: ${allKlines.length} total candles`, 'SUCCESS');
+        
+    //     // Remove duplicates (can happen at batch boundaries) and sort by time
+    //     const uniqueKlines = allKlines.filter((kline, index, array) => 
+    //         index === 0 || kline[0] !== array[index - 1][0]
+    //     ).sort((a, b) => a[0] - b[0]);
+        
+    //     this.log(`🔄 After deduplication: ${uniqueKlines.length} unique candles`, 'INFO');
+        
+    //     return uniqueKlines.map(kline => ({
+    //         time: new Date(kline[0]),
+    //         open: parseFloat(kline[1]),
+    //         high: parseFloat(kline[2]),
+    //         low: parseFloat(kline[3]),
+    //         close: parseFloat(kline[4]),
+    //         volume: parseFloat(kline[5])
+    //     }));
+    // }
+
+    async getHistoricalData(startDate = null, endDate = null, limit = 1000) {
+    const symbol = this.config.symbol.toUpperCase();
+    const interval = this.config.timeframe;
+    const cacheDir = path.join(__dirname, 'data_cache');
+    if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir);
+
+    // If both dates are provided, try cache
+    let cacheFile = null;
+    if (startDate && endDate) {
+        const fileSafe = `${symbol}_${interval}_${startDate}_${endDate}.json`
+            .replace(/[^a-zA-Z0-9_.-]/g, "_");
+        cacheFile = path.join(cacheDir, fileSafe);
+
+        if (fs.existsSync(cacheFile)) {
+            this.log(`📂 Loaded candles from cache: ${cacheFile}`, 'INFO');
+            const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+            return cached.map(d => ({
+                time: new Date(d.time),
+                open: d.open,
+                high: d.high,
+                low: d.low,
+                close: d.close,
+                volume: d.volume
+            }));
         }
-        
-        if (batchCount >= maxBatches) {
-            this.log(`⚠️ Reached maximum batch limit (${maxBatches}). Data may be incomplete.`, 'WARNING');
-        }
-        
-        this.log(`✅ Historical data collection complete: ${allKlines.length} total candles`, 'SUCCESS');
-        
-        // Remove duplicates (can happen at batch boundaries) and sort by time
-        const uniqueKlines = allKlines.filter((kline, index, array) => 
-            index === 0 || kline[0] !== array[index - 1][0]
-        ).sort((a, b) => a[0] - b[0]);
-        
-        this.log(`🔄 After deduplication: ${uniqueKlines.length} unique candles`, 'INFO');
-        
-        return uniqueKlines.map(kline => ({
-            time: new Date(kline[0]),
-            open: parseFloat(kline[1]),
-            high: parseFloat(kline[2]),
-            low: parseFloat(kline[3]),
-            close: parseFloat(kline[4]),
-            volume: parseFloat(kline[5])
-        }));
     }
+
+    // === Your original batching logic starts here ===
+    if (!startDate && !endDate) {
+        try {
+            const data = await this.fetchKlinesBatch(symbol, interval, null, null, limit);
+            return data.map(kline => ({
+                time: new Date(kline[0]),
+                open: parseFloat(kline[1]),
+                high: parseFloat(kline[2]),
+                low: parseFloat(kline[3]),
+                close: parseFloat(kline[4]),
+                volume: parseFloat(kline[5])
+            }));
+        } catch (error) {
+            this.log(`Error fetching recent historical data: ${error.message}`, 'ERROR');
+            return [];
+        }
+    }
+
+    const startTime = new Date(startDate).getTime();
+    const endTime = new Date(endDate).getTime();
+    const timeframeMs = this.getTimeframeMs();
+
+    this.log(`📅 Fetching historical data from ${startDate} to ${endDate}`, 'INFO');
+    this.log(`⏱️ Timeframe: ${interval} (${timeframeMs}ms per candle)`, 'INFO');
+
+    const allKlines = [];
+    let currentStartTime = startTime;
+    let batchCount = 0;
+    const maxBatches = 50;
+
+    while (currentStartTime < endTime && batchCount < maxBatches) {
+        try {
+            const batchEndTime = Math.min(currentStartTime + (1000 * timeframeMs), endTime);
+
+            this.log(`📦 Fetching batch ${batchCount + 1}: ${new Date(currentStartTime).toISOString()} to ${new Date(batchEndTime).toISOString()}`, 'INFO');
+
+            const batchData = await this.fetchKlinesBatch(symbol, interval, currentStartTime, batchEndTime, 1000);
+
+            if (batchData.length === 0) {
+                this.log('📭 No more data available', 'INFO');
+                break;
+            }
+
+            allKlines.push(...batchData);
+
+            const lastCandleTime = batchData[batchData.length - 1][0];
+            currentStartTime = lastCandleTime + timeframeMs;
+
+            batchCount++;
+
+            this.log(`📊 Batch ${batchCount} complete: ${batchData.length} candles (Total: ${allKlines.length})`, 'INFO');
+
+            if (batchCount < maxBatches) {
+                await new Promise(resolve => setTimeout(resolve, 100)); 
+            }
+
+            if (batchData.length < 1000) {
+                break;
+            }
+
+        } catch (error) {
+            this.log(`❌ Error fetching batch ${batchCount + 1}: ${error.message}`, 'ERROR');
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            currentStartTime += 1000 * timeframeMs;
+            batchCount++;
+        }
+    }
+
+    if (batchCount >= maxBatches) {
+        this.log(`⚠️ Reached maximum batch limit (${maxBatches}). Data may be incomplete.`, 'WARNING');
+    }
+
+    this.log(`✅ Historical data collection complete: ${allKlines.length} total candles`, 'SUCCESS');
+
+    const uniqueKlines = allKlines.filter((kline, index, array) => 
+        index === 0 || kline[0] !== array[index - 1][0]
+    ).sort((a, b) => a[0] - b[0]);
+
+    this.log(`🔄 After deduplication: ${uniqueKlines.length} unique candles`, 'INFO');
+
+    const finalData = uniqueKlines.map(kline => ({
+        time: new Date(kline[0]),
+        open: parseFloat(kline[1]),
+        high: parseFloat(kline[2]),
+        low: parseFloat(kline[3]),
+        close: parseFloat(kline[4]),
+        volume: parseFloat(kline[5])
+    }));
+
+    // Save to cache if requested
+    if (cacheFile) {
+        fs.writeFileSync(cacheFile, JSON.stringify(finalData, null, 2));
+        this.log(`💾 Saved candles to cache: ${cacheFile}`, 'SUCCESS');
+    }
+
+    return finalData;
+}
+
 
     // Get recent historical data for initialization
     async getRecentHistoricalData() {
@@ -393,6 +669,7 @@ class CryptoScalpingTester {
                     this.entryPrice = price * (1 + this.config.slippagePct);
                     this.entryTime = new Date();
                     this.balance = 0;
+                    this.resetTrailingStop(); // Reset for new trade
                 } catch (error) {
                     this.log(`❌ Failed to execute BUY order: ${error.message}`, 'ERROR');
                     return;
@@ -402,27 +679,65 @@ class CryptoScalpingTester {
                 this.entryPrice = price * (1 + this.config.slippagePct);
                 this.entryTime = new Date();
                 this.balance = 0;
+                this.resetTrailingStop(); // Reset for new trade
             }
             
-            this.log(`🟢 BUY: ${amount.toFixed(6)} ${this.config.symbol} at $${price.toFixed(4)} | RSI: ${rsi.toFixed(2)} | EMA: ${ema.toFixed(4)} | Mode: ${this.config.realTrading ? 'REAL' : 'PAPER'}`, 'TRADE');
+            this.log(`🟢 BUY: ${amount.toFixed(6)} ${this.config.symbol} at ${price.toFixed(4)} | RSI: ${rsi.toFixed(2)} | EMA: ${ema.toFixed(4)} | Mode: ${this.config.realTrading ? 'REAL' : 'PAPER'}`, 'TRADE');
             return;
         }
 
-        // SELL signals
+        // Update trailing stop for open positions
         if (this.holdings > 0) {
+            this.updateTrailingStop(price);
+            
             const changePct = ((price - this.entryPrice) / this.entryPrice) * 100;
             let shouldSell = false;
             let reason = '';
 
-            if (changePct >= this.config.tp2Pct || rsi >= this.config.rsiExit2) {
+            // Check trailing stop first (highest priority when active)
+            if (this.isTrailingStopTriggered(price)) {
                 shouldSell = true;
-                reason = changePct >= this.config.tp2Pct ? 'TP2' : 'RSI Exit 2';
-            } else if (changePct >= this.config.tp1Pct || rsi >= this.config.rsiExit1) {
-                shouldSell = true;
-                reason = changePct >= this.config.tp1Pct ? 'TP1' : 'RSI Exit 1';
-            } else if (changePct <= this.config.slPct) {
-                shouldSell = true;
-                reason = 'Stop Loss';
+                reason = 'Trailing Stop';
+            }
+            // Traditional exit conditions based on mode
+            else if (this.config.trailingStopMode === 'replace_tp') {
+                // Trailing stop replaces TP levels - only use RSI exits and SL
+                if (rsi >= this.config.rsiExit2) {
+                    shouldSell = true;
+                    reason = 'RSI Exit 2';
+                } else if (rsi >= this.config.rsiExit1 && !this.trailingStopActive) {
+                    shouldSell = true;
+                    reason = 'RSI Exit 1';
+                } else if (changePct <= this.config.slPct) {
+                    shouldSell = true;
+                    reason = 'Stop Loss';
+                }
+            }
+            else if (this.config.trailingStopMode === 'additional') {
+                // Trailing stop works alongside all other exits
+                if (changePct >= this.config.tp2Pct || rsi >= this.config.rsiExit2) {
+                    shouldSell = true;
+                    reason = changePct >= this.config.tp2Pct ? 'TP2' : 'RSI Exit 2';
+                } else if (changePct >= this.config.tp1Pct || rsi >= this.config.rsiExit1) {
+                    shouldSell = true;
+                    reason = changePct >= this.config.tp1Pct ? 'TP1' : 'RSI Exit 1';
+                } else if (changePct <= this.config.slPct) {
+                    shouldSell = true;
+                    reason = 'Stop Loss';
+                }
+            }
+            else { // 'both' mode (default) - Balanced approach
+                if (changePct >= this.config.tp2Pct || rsi >= this.config.rsiExit2) {
+                    shouldSell = true;
+                    reason = changePct >= this.config.tp2Pct ? 'TP2' : 'RSI Exit 2';
+                } else if (!this.trailingStopActive && (changePct >= this.config.tp1Pct || rsi >= this.config.rsiExit1)) {
+                    // Only use TP1/RSI1 if trailing stop hasn't activated yet
+                    shouldSell = true;
+                    reason = changePct >= this.config.tp1Pct ? 'TP1' : 'RSI Exit 1';
+                } else if (changePct <= this.config.slPct) {
+                    shouldSell = true;
+                    reason = 'Stop Loss';
+                }
             }
 
             if (shouldSell) {
@@ -449,9 +764,12 @@ class CryptoScalpingTester {
                 }
 
                 const holdTime = this.entryTime ? Math.round((new Date() - this.entryTime) / 60000) : 0;
-                this.log(`🔴 SELL: ${reason} at $${price.toFixed(4)} | P&L: ${changePct.toFixed(2)}% | Balance: $${this.balance.toFixed(2)} | Hold: ${holdTime}min | Mode: ${this.config.realTrading ? 'REAL' : 'PAPER'}`, 'TRADE');
+                const maxProfitPct = this.trailingStopActive ? ((this.highestPriceSinceEntry - this.entryPrice) / this.entryPrice) * 100 : changePct;
+                
+                this.log(`🔴 SELL: ${reason} at ${price.toFixed(4)} | P&L: ${changePct.toFixed(2)}% | Max Profit: ${maxProfitPct.toFixed(2)}% | Balance: ${this.balance.toFixed(2)} | Hold: ${holdTime}min | Mode: ${this.config.realTrading ? 'REAL' : 'PAPER'}`, 'TRADE');
                 
                 this.entryTime = null;
+                this.resetTrailingStop();
             }
         }
     }
@@ -552,10 +870,21 @@ class CryptoScalpingTester {
         const currentEMA = emas[emas.length - 1];
         const currentRSI = rsis[rsis.length - 1];
         
-        if (currentEMA && currentRSI) {
-            this.log(`📊 ${new Date().toLocaleTimeString()} | Price: $${price.toFixed(4)} | RSI: ${currentRSI.toFixed(2)} | EMA: ${currentEMA.toFixed(4)} | Holdings: ${this.holdings.toFixed(6)}`, 'DATA');
-            await this.processSignal(price, currentEMA, currentRSI);
-        }
+       if (currentEMA && currentRSI) {
+    const trailingInfo = this.trailingStopActive ? 
+        ` | Trail: ${this.trailingStopPrice.toFixed(4)} (High: ${this.highestPriceSinceEntry.toFixed(4)})` : '';
+    
+    // Calculate unrealized P&L if holding position
+    let pnlInfo = '';
+    if (this.holdings > 0) {
+        const { pnlDollar, pnlPercent } = this.calculateUnrealizedPnL(price);
+        const pnlColor = pnlPercent >= 0 ? '🟢' : '🔴';
+        pnlInfo = ` | ${pnlColor} P&L: $${pnlDollar.toFixed(2)} (${pnlPercent.toFixed(2)}%)`;
+    }
+    
+    this.log(`📊 ${new Date().toLocaleTimeString()} | Price: ${price.toFixed(4)} | RSI: ${currentRSI.toFixed(2)} | EMA: ${currentEMA.toFixed(4)} | Holdings: ${this.holdings.toFixed(6)}${pnlInfo}${trailingInfo}`, 'DATA');
+    await this.processSignal(price, currentEMA, currentRSI);
+}
     }
 
     // Schedule reconnection attempt
@@ -607,36 +936,27 @@ class CryptoScalpingTester {
     }
 
     // Run backtest
-    async runBacktest() {
+       // Modified runBacktest with tracking
+   async runBacktest() {
         this.log('📊 Starting backtest...', 'INFO');
         
-        // Validate date range
+        // Initialize tracking
+        this.initializeTradeTracking();
+        
         const startTime = new Date(this.config.startDate).getTime();
         const endTime = new Date(this.config.endDate).getTime();
         const daysDifference = (endTime - startTime) / (1000 * 60 * 60 * 24);
         
         this.log(`📅 Backtest period: ${this.config.startDate} to ${this.config.endDate} (${daysDifference.toFixed(1)} days)`, 'INFO');
         
-        if (daysDifference > 365) {
-            this.log('⚠️ Large date range detected. This may take several minutes to download all data...', 'WARNING');
-        }
-        
         const data = await this.getHistoricalData(this.config.startDate, this.config.endDate);
         
         if (data.length === 0) {
-            this.log('❌ No historical data available for the specified date range', 'ERROR');
+            this.log('❌ No historical data available', 'ERROR');
             return;
         }
 
-        this.log(`📈 Processing ${data.length} candles for ${this.config.symbol}`, 'INFO');
-        this.log(`📊 Data range: ${data[0].time.toISOString()} to ${data[data.length - 1].time.toISOString()}`, 'INFO');
-        
-        // Validate we have enough data for indicators
-        const requiredCandles = Math.max(this.config.emaPeriod, this.config.rsiPeriod);
-        if (data.length < requiredCandles) {
-            this.log(`❌ Insufficient data: ${data.length} candles, need at least ${requiredCandles} for indicators`, 'ERROR');
-            return;
-        }
+        this.log(`📈 Processing ${data.length} candles`, 'INFO');
         
         const prices = data.map(d => d.close);
         const emas = this.calculateEMA(prices, this.config.emaPeriod);
@@ -644,55 +964,369 @@ class CryptoScalpingTester {
 
         this.log('🔄 Processing trading signals...', 'INFO');
         
-        let processedCandles = 0;
-        let lastProgressLog = 0;
-        
         for (let i = 0; i < data.length; i++) {
             if (emas[i] && rsis[i]) {
-                await this.processSignal(prices[i], emas[i], rsis[i]);
-                processedCandles++;
+                // Store data for visualization
+                this.timestamps.push(data[i].time.toISOString());
+                this.priceHistory.push(prices[i]);
+                this.emaHistory.push(emas[i]);
+                this.rsiHistory.push(rsis[i]);
                 
-                // Progress logging for large datasets
-                if (data.length > 10000 && i - lastProgressLog > Math.floor(data.length / 20)) {
-                    const progress = ((i / data.length) * 100).toFixed(1);
-                    this.log(`📈 Backtest progress: ${progress}% (${i}/${data.length} candles)`, 'INFO');
-                    lastProgressLog = i;
+                // Track trailing stop status
+                if (this.holdings > 0 && this.trailingStopActive) {
+                    this.trailingStopHistory.push(this.trailingStopPrice);
+                } else {
+                    this.trailingStopHistory.push(null);
+                }
+                
+                // Check for trades
+                const wasHolding = this.holdings > 0;
+                const wasTrailingActive = this.trailingStopActive;
+                await this.processSignalWithTracking(prices[i], emas[i], rsis[i], data[i].time);
+                const isHolding = this.holdings > 0;
+                const isTrailingActive = this.trailingStopActive;
+                
+                // Track trailing stop activation
+                if (!wasTrailingActive && isTrailingActive) {
+                    this.trailingStopEvents.push({
+                        type: 'TRAILING_START',
+                        price: prices[i],
+                        timestamp: data[i].time.toISOString(),
+                        index: i,
+                        stopPrice: this.trailingStopPrice
+                    });
+                }
+                
+                // Track trade execution
+                if (!wasHolding && isHolding) {
+                    // Buy signal
+                    this.trades.push({
+                        type: 'BUY',
+                        price: prices[i],
+                        timestamp: data[i].time.toISOString(),
+                        index: i
+                    });
+                } else if (wasHolding && !isHolding) {
+                    // Sell signal
+                    const lastBuy = [...this.trades].reverse().find(t => t.type === 'BUY');
+                    const profitPct = lastBuy ? ((prices[i] - lastBuy.price) / lastBuy.price * 100) : 0;
+                    
+                    this.trades.push({
+                        type: 'SELL',
+                        price: prices[i],
+                        timestamp: data[i].time.toISOString(),
+                        index: i,
+                        profitPct: profitPct
+                    });
                 }
             }
         }
 
-        // Calculate final results
+        // Calculate results
         const finalPrice = prices[prices.length - 1];
         const finalBalance = this.balance + (this.holdings * finalPrice);
         const roi = ((finalBalance - this.config.initialBalance) / this.config.initialBalance) * 100;
         const totalTrades = this.wins + this.losses;
         const winRate = totalTrades > 0 ? ((this.wins / totalTrades) * 100) : 0;
-        const avgTradeReturn = totalTrades > 0 ? (roi / totalTrades) : 0;
-        
-        // Calculate some additional metrics
-        const tradingDays = daysDifference;
-        const tradesPerDay = totalTrades / tradingDays;
-        const annualizedROI = daysDifference > 0 ? (roi * (365 / daysDifference)) : 0;
 
+        // Print results
         this.log('\n📋 BACKTEST RESULTS:', 'RESULT');
-        this.log('=' * 50, 'RESULT');
-        this.log(`📊 Dataset: ${data.length} candles over ${daysDifference.toFixed(1)} days`, 'RESULT');
-        this.log(`🕒 Period: ${data[0].time.toDateString()} to ${data[data.length - 1].time.toDateString()}`, 'RESULT');
-        this.log(`💰 Initial Balance: ${this.config.initialBalance.toFixed(2)}`, 'RESULT');
         this.log(`💰 Final Balance: ${finalBalance.toFixed(2)}`, 'RESULT');
-        this.log(`📈 Total ROI: ${roi.toFixed(2)}%`, 'RESULT');
-        this.log(`📅 Annualized ROI: ${annualizedROI.toFixed(2)}%`, 'RESULT');
-        this.log(`🎯 Total Trades: ${totalTrades}`, 'RESULT');
-        this.log(`✅ Wins: ${this.wins} (${winRate.toFixed(1)}%)`, 'RESULT');
-        this.log(`❌ Losses: ${this.losses} (${(100 - winRate).toFixed(1)}%)`, 'RESULT');
-        this.log(`📊 Avg Return/Trade: ${avgTradeReturn.toFixed(3)}%`, 'RESULT');
-        this.log(`🔄 Trades/Day: ${tradesPerDay.toFixed(2)}`, 'RESULT');
-        
-        if (this.holdings > 0) {
-            this.log(`⚠️ Still holding ${this.holdings.toFixed(6)} ${this.config.symbol} at end of backtest`, 'RESULT');
+        this.log(`📈 ROI: ${roi.toFixed(2)}%`, 'RESULT');
+        this.log(`✅ Wins: ${this.wins}`, 'RESULT');
+        this.log(`❌ Losses: ${this.losses}`, 'RESULT');
+        this.log(`🎯 Win Rate: ${winRate.toFixed(1)}%`, 'RESULT');
+
+        // Generate visualization
+        this.generateBacktestChart(finalBalance, roi, winRate);
+    }
+
+    // Modified processSignal for tracking (add this version)
+    async processSignalWithTracking(price, ema, rsi, timestamp) {
+        if (isNaN(price) || isNaN(ema) || isNaN(rsi)) return;
+
+        // BUY signal
+        if (this.holdings === 0 && price > ema && rsi <= this.config.rsiEntry) {
+            const amount = this.balance / price;
+            this.holdings = amount;
+            this.entryPrice = price * (1 + this.config.slippagePct);
+            this.entryTime = timestamp;
+            this.balance = 0;
+            this.resetTrailingStop();
+            return;
         }
-        
-        this.log('=' * 50, 'RESULT');
+
+        // SELL logic (simplified for tracking)
+        if (this.holdings > 0) {
+            this.updateTrailingStop(price);
+            const changePct = ((price - this.entryPrice) / this.entryPrice) * 100;
+            let shouldSell = false;
+
+            if (this.isTrailingStopTriggered(price) ||
+                changePct >= this.config.tp2Pct || 
+                changePct >= this.config.tp1Pct ||
+                rsi >= this.config.rsiExit2 ||
+                rsi >= this.config.rsiExit1 ||
+                changePct <= this.config.slPct) {
+                shouldSell = true;
+            }
+
+            if (shouldSell) {
+                const sellPrice = price * (1 - this.config.feePct);
+                this.balance = this.holdings * sellPrice;
+                this.holdings = 0;
+                
+                if (changePct > 0) this.wins++;
+                else this.losses++;
+                
+                this.entryTime = null;
+                this.resetTrailingStop();
+            }
+        }
+    }
+
+    // Generate interactive chart
+    generateBacktestChart(finalBalance, roi, winRate) {
+        const html = `<!DOCTYPE html>
+<html>
+<head>
+    <title>Backtest Results - ${this.config.symbol}</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 20px; 
+            background: #1a1a1a;
+            color: #fff;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 30px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .stat-card {
+            background: #2a2a2a;
+            padding: 20px;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+        .stat-label { 
+            font-size: 14px; 
+            color: #888; 
+            margin-bottom: 5px;
+        }
+        .stat-value { 
+            font-size: 28px; 
+            font-weight: bold; 
+            color: #fff;
+        }
+        .chart-container { 
+            background: #2a2a2a; 
+            padding: 20px; 
+            border-radius: 8px; 
+            margin-bottom: 20px;
+        }
+        canvas { max-height: 400px; }
+        h2 { color: #667eea; }
+        .positive { color: #4ade80; }
+        .negative { color: #f87171; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 Backtest Results: ${this.config.symbol}</h1>
+            <p>Period: ${this.config.startDate} to ${this.config.endDate}</p>
+        </div>
+
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-label">Final Balance</div>
+                <div class="stat-value">$${finalBalance.toFixed(2)}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">ROI</div>
+                <div class="stat-value ${roi >= 0 ? 'positive' : 'negative'}">${roi.toFixed(2)}%</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Win Rate</div>
+                <div class="stat-value">${winRate.toFixed(1)}%</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Total Trades</div>
+                <div class="stat-value">${this.wins + this.losses}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Wins</div>
+                <div class="stat-value positive">${this.wins}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Losses</div>
+                <div class="stat-value negative">${this.losses}</div>
+            </div>
+        </div>
+
+        <div class="chart-container">
+            <h2>Price & EMA</h2>
+            <canvas id="priceChart"></canvas>
+        </div>
+
+        <div class="chart-container">
+            <h2>RSI</h2>
+            <canvas id="rsiChart"></canvas>
+        </div>
+    </div>
+
+    <script>
+        const timestamps = ${JSON.stringify(this.timestamps)};
+        const prices = ${JSON.stringify(this.priceHistory)};
+        const emas = ${JSON.stringify(this.emaHistory)};
+        const rsis = ${JSON.stringify(this.rsiHistory)};
+        const trades = ${JSON.stringify(this.trades)};
+
+        // Price Chart
+        const priceCtx = document.getElementById('priceChart').getContext('2d');
+        new Chart(priceCtx, {
+            type: 'line',
+            data: {
+                labels: timestamps,
+                datasets: [
+                    {
+                        label: 'Price',
+                        data: prices,
+                        borderColor: '#667eea',
+                        backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        tension: 0.1
+                    },
+                    {
+                        label: 'EMA ${this.config.emaPeriod}',
+                        data: emas,
+                        borderColor: '#f59e0b',
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        tension: 0.1
+                    },
+                    {
+                        label: 'Buy',
+                        data: timestamps.map((t, i) => {
+                            const buy = trades.find(tr => tr.type === 'BUY' && tr.index === i);
+                            return buy ? buy.price : null;
+                        }),
+                        borderColor: '#4ade80',
+                        backgroundColor: '#4ade80',
+                        pointRadius: 6,
+                        pointStyle: 'triangle',
+                        showLine: false
+                    },
+                    {
+                        label: 'Sell',
+                        data: timestamps.map((t, i) => {
+                            const sell = trades.find(tr => tr.type === 'SELL' && tr.index === i);
+                            return sell ? sell.price : null;
+                        }),
+                        borderColor: '#f87171',
+                        backgroundColor: '#f87171',
+                        pointRadius: 6,
+                        pointStyle: 'rectRot',
+                        showLine: false
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                interaction: { intersect: false, mode: 'index' },
+                plugins: {
+                    legend: { labels: { color: '#fff' } }
+                },
+                scales: {
+                    x: { 
+                        ticks: { color: '#888', maxTicksLimit: 10 },
+                        grid: { color: '#333' }
+                    },
+                    y: { 
+                        ticks: { color: '#888' },
+                        grid: { color: '#333' }
+                    }
+                }
+            }
+        });
+
+        // RSI Chart
+        const rsiCtx = document.getElementById('rsiChart').getContext('2d');
+        new Chart(rsiCtx, {
+            type: 'line',
+            data: {
+                labels: timestamps,
+                datasets: [{
+                    label: 'RSI',
+                    data: rsis,
+                    borderColor: '#a78bfa',
+                    backgroundColor: 'rgba(167, 139, 250, 0.1)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.1
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                interaction: { intersect: false, mode: 'index' },
+                plugins: {
+                    legend: { labels: { color: '#fff' } },
+                    annotation: {
+                        annotations: {
+                            line1: {
+                                type: 'line',
+                                yMin: 70,
+                                yMax: 70,
+                                borderColor: '#f87171',
+                                borderWidth: 1,
+                                borderDash: [5, 5]
+                            },
+                            line2: {
+                                type: 'line',
+                                yMin: 30,
+                                yMax: 30,
+                                borderColor: '#4ade80',
+                                borderWidth: 1,
+                                borderDash: [5, 5]
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: { 
+                        ticks: { color: '#888', maxTicksLimit: 10 },
+                        grid: { color: '#333' }
+                    },
+                    y: { 
+                        min: 0,
+                        max: 100,
+                        ticks: { color: '#888' },
+                        grid: { color: '#333' }
+                    }
+                }
+            }
+        });
+    </script>
+</body>
+</html>`;
+
+        const filename = `backtest_${this.config.symbol}_${Date.now()}.html`;
+        fs.writeFileSync(filename, html);
+        this.log(`\n📊 Chart saved to: ${filename}`, 'SUCCESS');
+        this.log(`Open this file in your browser to view results`, 'INFO');
     }
 
     // Start forward testing
@@ -721,29 +1355,38 @@ class CryptoScalpingTester {
         await this.connectWebSocket();
         
         // Handle graceful shutdown
-        process.on('SIGINT', () => {
-            this.log('\n🛑 Shutdown signal received...', 'INFO');
-            this.shouldReconnect = false;
+        // process.on('SIGINT', () => {
+        //     this.log('\n🛑 Shutdown signal received...', 'INFO');
+        //     this.shouldReconnect = false;
             
-            if (this.ws) {
-                this.ws.close();
-            }
+        //     if (this.ws) {
+        //         this.ws.close();
+        //     }
             
-            if (this.heartbeatTimer) {
-                clearInterval(this.heartbeatTimer);
-            }
+        //     if (this.heartbeatTimer) {
+        //         clearInterval(this.heartbeatTimer);
+        //     }
             
-            const finalBalance = this.balance + (this.holdings * (this.priceData[this.priceData.length - 1] || 0));
-            const roi = ((finalBalance - this.config.initialBalance) / this.config.initialBalance) * 100;
+        //     const finalBalance = this.balance + (this.holdings * (this.priceData[this.priceData.length - 1] || 0));
+        //     const roi = ((finalBalance - this.config.initialBalance) / this.config.initialBalance) * 100;
             
-            this.log('\n📋 FORWARD TEST RESULTS:', 'RESULT');
-            this.log(`Final Balance: $${finalBalance.toFixed(2)}`, 'RESULT');
-            this.log(`ROI: ${roi.toFixed(2)}%`, 'RESULT');
-            this.log(`Wins: ${this.wins}`, 'RESULT');
-            this.log(`Losses: ${this.losses}`, 'RESULT');
+        //     this.log('\n📋 FORWARD TEST RESULTS:', 'RESULT');
+        //     this.log(`Final Balance: $${finalBalance.toFixed(2)}`, 'RESULT');
+        //     this.log(`ROI: ${roi.toFixed(2)}%`, 'RESULT');
+        //     this.log(`Wins: ${this.wins}`, 'RESULT');
+        //     this.log(`Losses: ${this.losses}`, 'RESULT');
             
-            process.exit(0);
-        });
+        //     process.exit(0);
+        // });
+
+        process.on('SIGINT', async () => {
+    await this.gracefulShutdown();
+});
+
+// Also handle SIGTERM for container environments
+process.on('SIGTERM', async () => {
+    await this.gracefulShutdown();
+});
     }
 
     // Main run method
@@ -758,27 +1401,33 @@ class CryptoScalpingTester {
 
 // Configuration - modify these parameters
 const config = {
-    symbol: 'AVAXUSDT',
+    symbol: 'NEARUSDT',
     timeframe: '3m',
-    startDate: '2025-08-05',
-    endDate: '2025-09-06',
+    startDate: '2025-09-03',
+    endDate: '2025-09-10',
     initialBalance: 890,
     emaPeriod: 100,
     rsiPeriod: 14,
     rsiEntry: 45,
     tp1Pct: 1.2,
     tp2Pct: 2.0,
-    slPct: -1.2,
+    slPct: -0.8,
     feePct: 0.001,
     slippagePct: 0.0005,
     rsiExit1: 80,
     rsiExit2: 85,
     backtest: true,  // Set to false for forward testing
     
+    // Trailing Stop Loss Configuration
+    enableTrailingStop: true,           // Enable/disable trailing stop
+    trailingStopTriggerPct: 0.8,       // Start trailing after 0.8% profit
+    trailingStopDistancePct: 0.2,       // Trail 0.4% below highest price
+    trailingStopMode: 'replace_tp',           // 'both', 'replace_tp', 'additional'
+    
     // Real Trading Configuration (DANGEROUS - USE WITH CAUTION!)
     realTrading: false,  // Set to true to enable real trading
-    apiKey: '',  // Your Binance API Key
-    apiSecret: '',  // Your Binance API Secret
+    apiKey: apiKey,  // Your Binance API Key
+    apiSecret: apiSecret,  // Your Binance API Secret
     
     // Connection Management
     maxReconnectAttempts: -1,  // -1 for infinite attempts
