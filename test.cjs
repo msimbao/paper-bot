@@ -750,9 +750,9 @@ async function compareStrategies(symbol, interval, start, end, capital, lev) {
 
 async function main() {
   // ========== CONFIG ==========
-  const FORWARD_TEST = false; // true = paper trading, false = backtest
+  const FORWARD_TEST = true; // true = paper trading, false = backtest
   const SYMBOL = 'NEARUSDT';
-  const INTERVAL = '15h';
+  const INTERVAL = '1h';
   const INITIAL_CAPITAL = 890;
   const LEVERAGE = 1;
   const STRATEGY_MODE = 'adaptive'; // adaptive, momentum, mean_reversion, pullback, bear_market
