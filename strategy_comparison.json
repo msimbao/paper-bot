@@ -1,52 +1,52 @@
 [
   {
-    "Strategy": "bear_market",
-    "Return %": "16.90",
-    "Trades": 401,
-    "Win Rate %": "38.9",
-    "Sharpe": "0.11",
-    "Max DD %": "-10.86",
-    "Liquidations": 0,
-    "Funding": "2.83"
-  },
-  {
-    "Strategy": "pullback",
-    "Return %": "-0.67",
-    "Trades": 418,
-    "Win Rate %": "37.8",
-    "Sharpe": "0.01",
-    "Max DD %": "-18.88",
-    "Liquidations": 0,
-    "Funding": "2.49"
-  },
-  {
-    "Strategy": "mean_reversion",
-    "Return %": "-10.73",
-    "Trades": 209,
-    "Win Rate %": "39.2",
-    "Sharpe": "-0.10",
-    "Max DD %": "-17.79",
-    "Liquidations": 0,
-    "Funding": "1.01"
+    "Strategy": "adaptive",
+    "Return %": "7.89",
+    "Trades": 91,
+    "Win Rate %": "46.2",
+    "Protected": "33.0%",
+    "Sharpe": "0.23",
+    "Max DD %": "-6.95",
+    "Liquidations": 0
   },
   {
     "Strategy": "momentum",
-    "Return %": "-12.77",
-    "Trades": 363,
-    "Win Rate %": "33.6",
-    "Sharpe": "-0.07",
-    "Max DD %": "-18.31",
-    "Liquidations": 0,
-    "Funding": "2.14"
+    "Return %": "-1.92",
+    "Trades": 68,
+    "Win Rate %": "42.6",
+    "Protected": "35.3%",
+    "Sharpe": "-0.05",
+    "Max DD %": "-11.91",
+    "Liquidations": 0
   },
   {
-    "Strategy": "adaptive",
-    "Return %": "-21.94",
-    "Trades": 540,
-    "Win Rate %": "37.0",
-    "Sharpe": "-0.13",
-    "Max DD %": "-24.08",
-    "Liquidations": 0,
-    "Funding": "3.20"
+    "Strategy": "pullback",
+    "Return %": "-4.31",
+    "Trades": 57,
+    "Win Rate %": "49.1",
+    "Protected": "31.6%",
+    "Sharpe": "-0.15",
+    "Max DD %": "-12.07",
+    "Liquidations": 0
+  },
+  {
+    "Strategy": "mean_reversion",
+    "Return %": "-5.46",
+    "Trades": 28,
+    "Win Rate %": "50.0",
+    "Protected": "35.7%",
+    "Sharpe": "-0.35",
+    "Max DD %": "-9.81",
+    "Liquidations": 0
+  },
+  {
+    "Strategy": "bear_market",
+    "Return %": "-11.08",
+    "Trades": 74,
+    "Win Rate %": "48.6",
+    "Protected": "36.5%",
+    "Sharpe": "-0.41",
+    "Max DD %": "-13.93",
+    "Liquidations": 0
   }
 ]

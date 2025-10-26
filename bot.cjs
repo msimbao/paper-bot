@@ -1246,7 +1246,7 @@ async function compareStrategiesBacktest(symbol, interval, startDate, endDate, i
 async function main() {
   // ==================== CONFIGURATION ====================
 
-  const FORWARD_TEST = false; // Set to true for paper trading, false for backtest
+  const FORWARD_TEST = true; // Set to true for paper trading, false for backtest
 
   const SYMBOL = 'NEARUSDT';
   const INTERVAL = '1h';
