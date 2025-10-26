@@ -437,17 +437,17 @@ class ImprovedTradingBacktest {
     // Simplified - position sizing only, stops are now dynamic
     if (isBull) {
       return {
-        positionSizePct: 0.5,
+        positionSizePct: 0.8,
         minHoldBars: 3 // Reduced for scalping
       };
     } else if (isBear) {
       return {
-        positionSizePct: 0.3,
+        positionSizePct: 0.6,
         minHoldBars: 3
       };
     } else {
       return {
-        positionSizePct: 0.4,
+        positionSizePct: 0.5,
         minHoldBars: 3
       };
     }
@@ -833,7 +833,7 @@ class ImprovedTradingBacktest {
               minHoldBars: 3
             };
 
-        console.log(`\n[${currentTime.toISOString()}] Price: ${currentPrice.toFixed(2)} | Regime: ${regime} | Capital: ${capital.toFixed(2)}`);
+        console.log(`\n[${currentTime}] Price: ${currentPrice.toFixed(2)} | Regime: ${regime} | Capital: ${capital.toFixed(2)}`);
         console.log(`RSI: ${latestSignal.rsi.toFixed(1)} | ATR: ${currentAtr.toFixed(2)}`);
 
         // Check for liquidation
@@ -1246,7 +1246,7 @@ async function compareStrategiesBacktest(symbol, interval, startDate, endDate, i
 async function main() {
   // ==================== CONFIGURATION ====================
 
-  const FORWARD_TEST = true; // Set to true for paper trading, false for backtest
+  const FORWARD_TEST = false; // Set to true for paper trading, false for backtest
 
   const SYMBOL = 'NEARUSDT';
   const INTERVAL = '1h';
@@ -1256,8 +1256,8 @@ async function main() {
   const STRATEGY_MODE = 'adaptive';
   const USE_REGIME_PARAMS = true;
 
-  const START_DATE = '2025-10-01';
-  const END_DATE = '2025-10-15';
+  const START_DATE = '2025-07-01';
+  const END_DATE = '2025-09-30';
 
   const UPDATE_INTERVAL_SECONDS = 60;
 
@@ -1353,8 +1353,8 @@ async function main() {
     if (trades.length > 0) {
       console.log('\nRecent Trades (last 10):');
       const recentTrades = trades.slice(-10).map(t => ({
-        Entry: t.entryTime.toISOString().slice(11, 19),
-        Exit: t.exitTime.toISOString().slice(11, 19),
+        Entry: t.entryTime.slice(11, 19),
+        Exit: t.exitTime.slice(11, 19),
         Dir: t.direction.toUpperCase(),
         EntryP: t.entryPrice.toFixed(2),
         ExitP: t.exitPrice.toFixed(2),
